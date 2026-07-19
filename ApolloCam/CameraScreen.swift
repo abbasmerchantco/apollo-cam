@@ -3,6 +3,7 @@ import SwiftUI
 struct CameraScreen: View {
     @StateObject private var camera = CameraController()
     @StateObject private var detector = SubjectDetector()
+    @StateObject private var tokenManager = TokenManager.shared
 
     @State private var selectedRule: CompositionRule? = nil   // nil = auto
     @State private var guidance = Guidance(message: "Looking for a subject…", aligned: false, suggestedRule: .ruleOfThirds)
@@ -10,6 +11,11 @@ struct CameraScreen: View {
     @State private var showRulePicker = false
     @State private var captured: UIImage?
     @State private var showCritique = false
+    @State private var showAdviceModal = false
+    @State private var currentFrameBuffer: CVPixelBuffer?
+    @State private var adviceCards: [AdviceCard] = []
+    @State private var adviceLoading = false
+    @State private var adviceError: String?
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
 
@@ -58,7 +64,10 @@ struct CameraScreen: View {
             }
             .onAppear {
                 camera.configure()
-                camera.onFrame = { buffer in detector.analyze(buffer) }
+                camera.onFrame = { buffer in 
+                    detector.analyze(buffer)
+                    currentFrameBuffer = buffer
+                }
             }
             .onDisappear { camera.stop() }
             .onReceive(detector.$subject) { _ in
@@ -73,6 +82,7 @@ struct CameraScreen: View {
             }
         }
         .sheet(isPresented: $showRulePicker) { rulePicker }
+        .sheet(isPresented: $showAdviceModal) { adviceSheet }
         .fullScreenCover(isPresented: $showCritique) {
             if let img = captured {
                 CritiqueView(image: img)
@@ -135,9 +145,30 @@ struct CameraScreen: View {
     }
 
     private var bottomBar: some View {
-        HStack {
-            Color.clear.frame(width: 64, height: 64)
+        HStack(spacing: 12) {
+            Button {
+                adviceLoading = true
+                adviceError = nil
+                Task {
+                    if tokenManager.canUseAdvice {
+                        await requestAdvice()
+                    } else {
+                        adviceError = "No advice tokens left today"
+                        adviceLoading = false
+                    }
+                }
+            } label: {
+                Image(systemName: "lightbulb.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.black)
+                    .frame(width: 52, height: 52)
+                    .background(gold.opacity(adviceLoading ? 0.6 : 1), in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
+            }
+            .disabled(adviceLoading || !tokenManager.canUseAdvice)
+            
             Spacer()
+            
             Button {
                 camera.capturePhoto { image in
                     guard let image else { return }
@@ -151,10 +182,33 @@ struct CameraScreen: View {
                     Circle().fill(.white).frame(width: 60, height: 60)
                 }
             }
+            
             Spacer()
             NavigationHintGallery()
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 16)
+    }
+    
+    private func requestAdvice() async {
+        guard let buffer = currentFrameBuffer else {
+            adviceError = "No camera frame available"
+            adviceLoading = false
+            return
+        }
+        
+        do {
+            let cards = try await AdviceService.getAdvice(
+                frameBuffer: buffer,
+                rule: guidance.suggestedRule,
+                subject: detector.subject
+            )
+            adviceCards = cards
+            tokenManager.useAdviceToken()
+            showAdviceModal = true
+        } catch {
+            adviceError = error.localizedDescription
+        }
+        adviceLoading = false
     }
 }
 
@@ -204,5 +258,65 @@ extension CameraScreen {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
+    }
+    
+    private var adviceSheet: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                if adviceLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Your coach is analyzing the scene…")
+                            .font(.footnote).foregroundColor(.secondary)
+                    }
+                    .padding(.top, 40)
+                } else if let error = adviceError {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.orange).font(.title2)
+                        Text(error)
+                            .font(.footnote).multilineTextAlignment(.center)
+                        Button("Dismiss") { showAdviceModal = false }
+                            .buttonStyle(.borderedProminent).tint(gold)
+                    }
+                    .padding()
+                } else {
+                    ScrollView {
+                        VStack(spacing: 12) {
+                            ForEach(adviceCards) { card in
+                                adviceCardView(card)
+                            }
+                        }
+                        .padding()
+                    }
+                }
+                Spacer()
+            }
+            .navigationTitle("Coach's advice")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showAdviceModal = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+    
+    private func adviceCardView(_ card: AdviceCard) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: card.icon)
+                    .foregroundColor(gold)
+                Text(card.title)
+                    .font(.headline)
+                Spacer()
+            }
+            Text(card.advice)
+                .font(.footnote)
+                .foregroundColor(.white.opacity(0.85))
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
     }
 }

@@ -6,6 +6,7 @@ struct CritiqueView: View {
     var mode: CritiqueMode = .myPhoto
 
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var tokenManager = TokenManager.shared
     @State private var critique: Critique?
     @State private var loading = false
     @State private var errorMessage: String?
@@ -42,6 +43,18 @@ struct CritiqueView: View {
                             Button("Try again") { Task { await run() } }
                                 .buttonStyle(.borderedProminent)
                                 .tint(gold)
+                        }
+                        .padding()
+                    } else if !tokenManager.canUseEval {
+                        VStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundColor(.orange)
+                            Text("No evaluation tokens left today")
+                                .font(.footnote)
+                                .multilineTextAlignment(.center)
+                            Text("You have 10 free evals per day. Upgrade to Pro for unlimited.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
                         .padding()
                     } else {
@@ -126,6 +139,7 @@ struct CritiqueView: View {
         do {
             let result = try await CritiqueService.critique(image: image, mode: mode)
             critique = result
+            tokenManager.useEvalToken()
             if let entryID { PhotoStore.shared.attachCritique(result, to: entryID) }
         } catch {
             errorMessage = error.localizedDescription

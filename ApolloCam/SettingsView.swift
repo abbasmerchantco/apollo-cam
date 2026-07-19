@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @State private var apiKey: String = ""
     @State private var keySaved = Keychain.loadAPIKey() != nil
+    @ObservedObject private var tokenManager = TokenManager.shared
     @AppStorage("critiqueModel") private var model = "claude-haiku-4-5-20251001"
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
@@ -10,6 +11,15 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section {
+                    LabeledContent("Live advice", value: "\(tokenManager.dailyAdviceTokens) left today")
+                    LabeledContent("Photo evals", value: "\(tokenManager.dailyEvalTokens) left today")
+                } header: {
+                    Text("Today's tokens")
+                } footer: {
+                    Text("Free tier includes 20 live advice taps and 10 photo evaluations per day. Resets at midnight.")
+                }
+
                 Section {
                     if keySaved {
                         HStack {
