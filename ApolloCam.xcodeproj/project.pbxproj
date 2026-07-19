@@ -1,0 +1,275 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B100000000000000000000A1 /* ApolloCamApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A1 /* ApolloCamApp.swift */; };
+		B100000000000000000000A2 /* CompositionRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A2 /* CompositionRules.swift */; };
+		B100000000000000000000A3 /* CameraController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A3 /* CameraController.swift */; };
+		B100000000000000000000A4 /* SubjectDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A4 /* SubjectDetector.swift */; };
+		B100000000000000000000A5 /* CameraScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A5 /* CameraScreen.swift */; };
+		B100000000000000000000A6 /* PhotoStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A6 /* PhotoStore.swift */; };
+		B100000000000000000000A7 /* CritiqueService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A7 /* CritiqueService.swift */; };
+		B100000000000000000000A8 /* CritiqueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A8 /* CritiqueView.swift */; };
+		B100000000000000000000A9 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A9 /* GalleryView.swift */; };
+		B100000000000000000000AA /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AA /* SettingsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A100000000000000000000A1 /* ApolloCamApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApolloCamApp.swift; sourceTree = "<group>"; };
+		A100000000000000000000A2 /* CompositionRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionRules.swift; sourceTree = "<group>"; };
+		A100000000000000000000A3 /* CameraController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraController.swift; sourceTree = "<group>"; };
+		A100000000000000000000A4 /* SubjectDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubjectDetector.swift; sourceTree = "<group>"; };
+		A100000000000000000000A5 /* CameraScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraScreen.swift; sourceTree = "<group>"; };
+		A100000000000000000000A6 /* PhotoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoStore.swift; sourceTree = "<group>"; };
+		A100000000000000000000A7 /* CritiqueService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueService.swift; sourceTree = "<group>"; };
+		A100000000000000000000A8 /* CritiqueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueView.swift; sourceTree = "<group>"; };
+		A100000000000000000000A9 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
+		A100000000000000000000AA /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A100000000000000000000FF /* ApolloCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApolloCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C100000000000000000000F1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D100000000000000000000E1 = {
+			isa = PBXGroup;
+			children = (
+				D100000000000000000000E2 /* ApolloCam */,
+				D100000000000000000000E3 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D100000000000000000000E2 /* ApolloCam */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000A1 /* ApolloCamApp.swift */,
+				A100000000000000000000A2 /* CompositionRules.swift */,
+				A100000000000000000000A3 /* CameraController.swift */,
+				A100000000000000000000A4 /* SubjectDetector.swift */,
+				A100000000000000000000A5 /* CameraScreen.swift */,
+				A100000000000000000000A6 /* PhotoStore.swift */,
+				A100000000000000000000A7 /* CritiqueService.swift */,
+				A100000000000000000000A8 /* CritiqueView.swift */,
+				A100000000000000000000A9 /* GalleryView.swift */,
+				A100000000000000000000AA /* SettingsView.swift */,
+			);
+			path = ApolloCam;
+			sourceTree = "<group>";
+		};
+		D100000000000000000000E3 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000FF /* ApolloCam.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E100000000000000000000D1 /* ApolloCam */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F100000000000000000000C3 /* Build configuration list for PBXNativeTarget "ApolloCam" */;
+			buildPhases = (
+				C100000000000000000000F2 /* Sources */,
+				C100000000000000000000F1 /* Frameworks */,
+				C100000000000000000000F3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ApolloCam;
+			productName = ApolloCam;
+			productReference = A100000000000000000000FF /* ApolloCam.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E100000000000000000000D0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1400;
+				LastUpgradeCheck = 1400;
+				TargetAttributes = {
+					E100000000000000000000D1 = {
+						CreatedOnToolsVersion = 14.0;
+					};
+				};
+			};
+			buildConfigurationList = F100000000000000000000C0 /* Build configuration list for PBXProject "ApolloCam" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D100000000000000000000E1;
+			productRefGroup = D100000000000000000000E3 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E100000000000000000000D1 /* ApolloCam */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C100000000000000000000F3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C100000000000000000000F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B100000000000000000000A1 /* ApolloCamApp.swift in Sources */,
+				B100000000000000000000A2 /* CompositionRules.swift in Sources */,
+				B100000000000000000000A3 /* CameraController.swift in Sources */,
+				B100000000000000000000A4 /* SubjectDetector.swift in Sources */,
+				B100000000000000000000A5 /* CameraScreen.swift in Sources */,
+				B100000000000000000000A6 /* PhotoStore.swift in Sources */,
+				B100000000000000000000A7 /* CritiqueService.swift in Sources */,
+				B100000000000000000000A8 /* CritiqueView.swift in Sources */,
+				B100000000000000000000A9 /* GalleryView.swift in Sources */,
+				B100000000000000000000AA /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		F100000000000000000000C1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		F100000000000000000000C2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		F100000000000000000000C4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Apollo Cam uses the camera to analyze your scene and guide your composition in real time.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = co.abbasmerchant.apollocam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		F100000000000000000000C5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Apollo Cam uses the camera to analyze your scene and guide your composition in real time.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = co.abbasmerchant.apollocam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F100000000000000000000C0 /* Build configuration list for PBXProject "ApolloCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F100000000000000000000C1 /* Debug */,
+				F100000000000000000000C2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F100000000000000000000C3 /* Build configuration list for PBXNativeTarget "ApolloCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F100000000000000000000C4 /* Debug */,
+				F100000000000000000000C5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E100000000000000000000D0 /* Project object */;
+}
