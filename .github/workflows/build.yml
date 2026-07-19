@@ -19,7 +19,6 @@ jobs:
             -target ApolloCam \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -28,7 +27,7 @@ jobs:
       - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -r build/Build/Products/Release-iphoneos/ApolloCam.app Payload/
+          cp -r ~/Library/Developer/Xcode/DerivedData/ApolloCam-*/Build/Products/Release-iphoneos/ApolloCam.app Payload/
           zip -r ApolloCam.ipa Payload
 
       - name: Upload IPA artifact
