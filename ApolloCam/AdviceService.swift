@@ -1,8 +1,6 @@
 import UIKit
-import CoreVideo
-import Vision
 
-struct AdviceCard: Identifiable {
+struct CoachTip: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let advice: String
@@ -13,75 +11,69 @@ enum AdviceError: LocalizedError {
     case noAPIKey
     case badResponse(String)
     case parseFailure
-    case frameConversionFailed
+    case noFrame
 
     var errorDescription: String? {
         switch self {
         case .noAPIKey: return "Add your Anthropic API key in Settings first."
         case .badResponse(let msg): return msg
-        case .parseFailure: return "Couldn't parse the advice. Try again."
-        case .frameConversionFailed: return "Couldn't process the camera frame."
+        case .parseFailure: return "Couldn't read the coach's tip. Try again."
+        case .noFrame: return "No camera frame available yet."
         }
     }
 }
 
 enum AdviceService {
-    /// Convert CVPixelBuffer (camera frame) to JPEG base64 for Claude Vision API
-    private static func frameToBase64(_ buffer: CVPixelBuffer) throws -> String {
-        let ciImage = CIImage(cvPixelBuffer: buffer)
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
-            throw AdviceError.frameConversionFailed
-        }
-        let uiImage = UIImage(cgImage: cgImage).resized(maxDimension: 720)
-        guard let jpeg = uiImage.jpegData(compressionQuality: 0.7) else {
-            throw AdviceError.frameConversionFailed
-        }
-        return jpeg.base64EncodedString()
-    }
-
-    /// Get live coaching advice from Claude Vision based on current frame + composition rule
-    static func getAdvice(
-        frameBuffer: CVPixelBuffer,
+    /// AI Partner: analyze the current framing and return ONE highest-impact coaching tip.
+    static func partnerTip(
+        snapshot: UIImage,
         rule: CompositionRule,
-        subject: SubjectObservation?
-    ) async throws -> [AdviceCard] {
+        subject: SubjectObservation?,
+        userSelectedSubject: Bool
+    ) async throws -> CoachTip {
         guard let apiKey = Keychain.loadAPIKey(), !apiKey.isEmpty else {
             throw AdviceError.noAPIKey
         }
+        guard let jpeg = snapshot.jpegData(compressionQuality: 0.7) else {
+            throw AdviceError.parseFailure
+        }
 
-        let base64Image = try frameToBase64(frameBuffer)
+        var subjectLine = "No subject has been identified yet."
+        if let s = subject {
+            let h = s.center.x < 0.4 ? "left" : (s.center.x > 0.6 ? "right" : "center")
+            let v = s.center.y < 0.4 ? "top" : (s.center.y > 0.6 ? "bottom" : "middle")
+            let size = Int(s.box.width * s.box.height * 100)
+            if userSelectedSubject {
+                subjectLine = "IMPORTANT: The user has explicitly tapped their intended subject. It sits at the \(v)-\(h) of the frame and fills roughly \(size)% of it. All advice must serve THIS subject."
+            } else {
+                subjectLine = "Auto-detected likely subject at the \(v)-\(h) of the frame, filling roughly \(size)% of it."
+            }
+        }
 
         let prompt = """
-You are a professional photography coach analyzing a live camera frame.
+You are a professional photographer coaching over the user's shoulder as they line up a shot on an iPhone.
 
-Current composition rule: \(rule.rawValue)
-Subject detected: \(subject.map { "centered at (\(String(format: "%.1f", $0.center.x)), \(String(format: "%.1f", $0.center.y)))" } ?? "none")
+\(subjectLine)
+The on-screen composition guide is currently: \(rule.rawValue).
 
-Analyze this frame and respond with ONLY a JSON object (no markdown, no preamble).
+Look at the frame and give the SINGLE highest-impact instruction to improve this shot right now. Consider composition, camera angle, distance, lighting direction, exposure, distracting elements, and timing — but pick only the ONE change that matters most.
 
-Focus on 3–4 highest-impact improvements in these priority areas:
-1. Composition & framing (subject placement, rule of thirds, leading lines, layers)
-2. Angle & perspective (camera angle, depth, foreground/background)
-3. Lighting & exposure (light direction, shadows, highlights, contrast)
-4. Distance & zoom (how close/far, what to include/exclude)
+Rules for the advice:
+- Concrete and physical: what to DO ("crouch lower", "step two paces left", "put the sun behind her")
+- Max 14 words
+- No jargon, no explanations, no gear suggestions
 
-For each recommendation, provide:
-- title: the element (e.g. "Angle", "Lighting", "Distance")
-- advice: one concrete actionable step in 12 words or less (e.g. "Lower your angle to emphasize the horizon")
-- icon: a single SF Symbol name (e.g. "square.and.arrow.up", "flashlight.on.fill", "arrow.left.and.right")
-
-Respond ONLY with this JSON structure (no code fences):
-{"cards": [{"title": "...", "advice": "...", "icon": "..."}, ...]}
+Respond with ONLY this JSON, no code fences, no preamble:
+{"title": "<one word category e.g. Angle, Light, Distance, Framing, Clutter, Timing>", "advice": "<the instruction>", "icon": "<one SF Symbol name that fits, e.g. arrow.down.circle, sun.max, arrow.left.and.right, viewfinder, trash, clock>"}
 """
 
         let body: [String: Any] = [
             "model": CritiqueService.model,
-            "max_tokens": 600,
+            "max_tokens": 200,
             "messages": [[
                 "role": "user",
                 "content": [
-                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64Image]],
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]],
                     ["type": "text", "text": prompt]
                 ]
             ]]
@@ -93,7 +85,7 @@ Respond ONLY with this JSON structure (no code fences):
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 30
+        request.timeoutInterval = 25
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -115,20 +107,11 @@ Respond ONLY with this JSON structure (no code fences):
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        struct CardData: Decodable {
-            let title: String
-            let advice: String
-            let icon: String
-        }
-        struct Response: Decodable {
-            let cards: [CardData]
-        }
-
-        guard let data = cleaned.data(using: .utf8),
-              let response = try? JSONDecoder().decode(Response.self, from: data) else {
+        struct TipData: Decodable { let title: String; let advice: String; let icon: String }
+        guard let d = cleaned.data(using: .utf8),
+              let tip = try? JSONDecoder().decode(TipData.self, from: d) else {
             throw AdviceError.parseFailure
         }
-
-        return response.cards.map { AdviceCard(title: $0.title, advice: $0.advice, icon: $0.icon) }
+        return CoachTip(title: tip.title, advice: tip.advice, icon: tip.icon)
     }
 }

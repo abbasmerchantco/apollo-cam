@@ -1,21 +1,34 @@
 import SwiftUI
+import Combine
 
 struct CameraScreen: View {
     @StateObject private var camera = CameraController()
     @StateObject private var detector = SubjectDetector()
-    @StateObject private var tokenManager = TokenManager.shared
+    @ObservedObject private var tokenManager = TokenManager.shared
 
+    // Composition
     @State private var selectedRule: CompositionRule? = nil   // nil = auto
-    @State private var guidance = Guidance(message: "Looking for a subject…", aligned: false, suggestedRule: .ruleOfThirds)
+    @State private var guidance = Guidance(message: "Point at your subject", aligned: false, suggestedRule: .ruleOfThirds)
     @State private var wasAligned = false
     @State private var showRulePicker = false
+
+    // Capture / critique
     @State private var captured: UIImage?
+    @State private var capturedEntryID: UUID?
     @State private var showCritique = false
-    @State private var showAdviceModal = false
-    @State private var currentFrameBuffer: CVPixelBuffer?
-    @State private var adviceCards: [AdviceCard] = []
-    @State private var adviceLoading = false
-    @State private var adviceError: String?
+
+    // Sheets
+    @State private var showGallery = false
+    @State private var showSettings = false
+
+    // AI Partner
+    @State private var partnerOn = false
+    @State private var partnerTip: CoachTip?
+    @State private var partnerLoading = false
+    @State private var partnerError: String?
+    @State private var stillSince: Date?
+    @State private var lastTipAt = Date.distantPast
+    private let heartbeat = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
 
@@ -25,49 +38,39 @@ struct CameraScreen: View {
                 Color.black.ignoresSafeArea()
 
                 if camera.permissionDenied {
-                    VStack(spacing: 12) {
-                        Image(systemName: "camera.fill").font(.largeTitle)
-                        Text("Camera access is off").font(.headline)
-                        Text("Enable it in Settings → Apollo Cam").font(.caption).foregroundColor(.secondary)
-                    }
-                    .foregroundColor(.white)
+                    permissionView
                 } else {
                     CameraPreview(session: camera.session)
                         .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .gesture(
+                            SpatialTapGesture()
+                                .onEnded { value in
+                                    let pt = CGPoint(x: value.location.x / geo.size.width,
+                                                     y: value.location.y / geo.size.height)
+                                    detector.selectedPoint = pt
+                                    Haptics.tap()
+                                }
+                        )
 
                     CompositionOverlay(rule: guidance.suggestedRule, aligned: guidance.aligned)
                         .ignoresSafeArea()
+                        .allowsHitTesting(false)
 
-                    // Subject bounding box
-                    if let subject = detector.subject {
-                        let box = CGRect(
-                            x: subject.box.origin.x * geo.size.width,
-                            y: subject.box.origin.y * geo.size.height,
-                            width: subject.box.width * geo.size.width,
-                            height: subject.box.height * geo.size.height)
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(guidance.aligned ? .green : gold, lineWidth: 2)
-                            .frame(width: box.width, height: box.height)
-                            .position(x: box.midX, y: box.midY)
-                            .animation(.easeOut(duration: 0.25), value: subject.box)
-                            .allowsHitTesting(false)
-                    }
+                    subjectBox(in: geo.size)
 
-                    VStack {
+                    VStack(spacing: 0) {
                         topBar
                         Spacer()
-                        guidanceBanner
+                        if partnerOn { partnerCard }
+                        guidanceStrip
                         bottomBar
                     }
-                    .padding(.bottom, 8)
                 }
             }
             .onAppear {
                 camera.configure()
-                camera.onFrame = { buffer in 
-                    detector.analyze(buffer)
-                    currentFrameBuffer = buffer
-                }
+                camera.onFrame = { buffer in detector.analyze(buffer) }
             }
             .onDisappear { camera.stop() }
             .onReceive(detector.$subject) { _ in
@@ -80,158 +83,318 @@ struct CameraScreen: View {
                 wasAligned = g.aligned
                 withAnimation(.easeInOut(duration: 0.2)) { guidance = g }
             }
+            .onReceive(heartbeat) { _ in partnerHeartbeat() }
         }
         .sheet(isPresented: $showRulePicker) { rulePicker }
-        .sheet(isPresented: $showAdviceModal) { adviceSheet }
+        .sheet(isPresented: $showGallery) { GalleryView() }
+        .sheet(isPresented: $showSettings) { SettingsView() }
         .fullScreenCover(isPresented: $showCritique) {
             if let img = captured {
-                CritiqueView(image: img)
+                CritiqueView(image: img, entryID: capturedEntryID)
             }
         }
     }
+
+    // MARK: - Subject box
+
+    @ViewBuilder
+    private func subjectBox(in size: CGSize) -> some View {
+        if let subject = detector.subject {
+            let box = CGRect(
+                x: subject.box.origin.x * size.width,
+                y: subject.box.origin.y * size.height,
+                width: subject.box.width * size.width,
+                height: subject.box.height * size.height)
+
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(guidance.aligned ? .green : gold,
+                            style: StrokeStyle(lineWidth: 2, dash: detector.selectedPoint == nil ? [6, 5] : []))
+
+                if detector.selectedPoint != nil {
+                    Button {
+                        detector.clearSelection()
+                        Haptics.tap()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(.white)
+                            .background(Circle().fill(.black.opacity(0.5)))
+                    }
+                    .offset(x: 10, y: -10)
+                }
+            }
+            .frame(width: box.width, height: box.height)
+            .position(x: box.midX, y: box.midY)
+            .animation(.easeOut(duration: 0.25), value: subject.box)
+        }
+    }
+
+    // MARK: - Bars
 
     private var topBar: some View {
         HStack {
             Button { showRulePicker = true } label: {
                 HStack(spacing: 6) {
                     Image(systemName: guidance.suggestedRule.icon)
-                    Text(selectedRule == nil ? "Auto · \(guidance.suggestedRule.rawValue)" : guidance.suggestedRule.rawValue)
+                    Text(selectedRule == nil ? "Auto" : guidance.suggestedRule.rawValue)
                         .font(.footnote.weight(.medium))
                 }
-                .padding(.horizontal, 14).padding(.vertical, 8)
+                .padding(.horizontal, 13).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: Capsule())
             }
             .foregroundColor(.white)
+
             Spacer()
+
             zoomControl
+
+            Spacer()
+
+            Button { showSettings = true } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.white)
+                    .padding(9)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
         }
         .padding(.horizontal)
-        .padding(.top, 4)
+        .padding(.top, 8)
     }
 
     private var zoomControl: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach([1.0, 2.0, 5.0], id: \.self) { z in
-                Button {
-                    camera.setZoom(z)
-                } label: {
+                Button { camera.setZoom(z) } label: {
                     Text(z == 1.0 ? "1×" : String(format: "%.0f×", z))
-                        .font(.footnote.weight(abs(camera.zoomFactor - z) < 0.3 ? .bold : .regular))
+                        .font(.caption.weight(abs(camera.zoomFactor - z) < 0.3 ? .bold : .regular))
                         .foregroundColor(abs(camera.zoomFactor - z) < 0.3 ? gold : .white)
-                        .padding(.horizontal, 10).padding(.vertical, 8)
+                        .padding(.horizontal, 9).padding(.vertical, 7)
                 }
             }
         }
         .background(.ultraThinMaterial, in: Capsule())
     }
 
-    private var guidanceBanner: some View {
+    private var guidanceStrip: some View {
         HStack(spacing: 8) {
             Image(systemName: guidance.aligned ? "checkmark.circle.fill" : "scope")
                 .foregroundColor(guidance.aligned ? .green : gold)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(guidance.message)
-                    .font(.footnote.weight(.medium))
-                    .foregroundColor(.white)
-                Text(guidance.suggestedRule.hint)
-                    .font(.caption2)
-                    .foregroundColor(.white.opacity(0.65))
-            }
+            Text(guidance.message)
+                .font(.footnote.weight(.medium))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal)
-        .padding(.bottom, 10)
+        .padding(.bottom, 8)
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                adviceLoading = true
-                adviceError = nil
-                Task {
-                    if tokenManager.canUseAdvice {
-                        await requestAdvice()
-                    } else {
-                        adviceError = "No advice tokens left today"
-                        adviceLoading = false
-                    }
+    // MARK: - AI Partner
+
+    private var partnerCard: some View {
+        Group {
+            if partnerLoading && partnerTip == nil {
+                HStack(spacing: 10) {
+                    ProgressView().tint(gold)
+                    Text("Coach is looking…")
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.8))
                 }
-            } label: {
-                Image(systemName: "lightbulb.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.black)
-                    .frame(width: 52, height: 52)
-                    .background(gold.opacity(adviceLoading ? 0.6 : 1), in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+            } else if let tip = partnerTip {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: sanitizedIcon(tip.icon))
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(gold)
+                        .frame(width: 26)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(tip.title.uppercased())
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(gold)
+                        Text(tip.advice)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    if partnerLoading { ProgressView().tint(gold.opacity(0.6)).scaleEffect(0.8) }
+                }
+                .padding(14)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .id(tip.id)
+            } else if let err = partnerError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(10)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
+            } else {
+                Text("Hold the framing steady and your coach will chime in")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+                    .padding(10)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
             }
-            .disabled(adviceLoading || !tokenManager.canUseAdvice)
-            
+        }
+        .animation(.spring(duration: 0.35), value: partnerTip)
+    }
+
+    /// SF Symbol names from the model can be invalid; fall back gracefully.
+    private func sanitizedIcon(_ name: String) -> String {
+        UIImage(systemName: name) != nil ? name : "lightbulb.fill"
+    }
+
+    private func partnerHeartbeat() {
+        guard partnerOn, !partnerLoading else { return }
+        guard tokenManager.canUseAdvice else {
+            partnerError = "Out of coaching tokens for today"
+            return
+        }
+
+        // Hold-still gate: motion must stay low for 1.2s
+        if camera.motionLevel < 0.045 {
+            if stillSince == nil { stillSince = Date() }
+        } else {
+            stillSince = nil
+            return
+        }
+        guard let since = stillSince, Date().timeIntervalSince(since) > 1.2 else { return }
+
+        // Don't re-analyze the same held framing: minimum 6s between tips
+        guard Date().timeIntervalSince(lastTipAt) > 6.0 else { return }
+
+        guard let snapshot = camera.currentSnapshot() else { return }
+
+        partnerLoading = true
+        partnerError = nil
+        lastTipAt = Date()
+
+        let rule = guidance.suggestedRule
+        let subject = detector.subject
+        let userSelected = detector.selectedPoint != nil
+
+        Task {
+            do {
+                let tip = try await AdviceService.partnerTip(
+                    snapshot: snapshot,
+                    rule: rule,
+                    subject: subject,
+                    userSelectedSubject: userSelected)
+                await MainActor.run {
+                    withAnimation { partnerTip = tip }
+                    tokenManager.useAdviceToken()
+                    partnerLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    partnerError = error.localizedDescription
+                    partnerLoading = false
+                }
+            }
+        }
+    }
+
+    // MARK: - Bottom bar
+
+    private var bottomBar: some View {
+        HStack {
+            Button { showGallery = true } label: {
+                galleryThumb
+            }
+
             Spacer()
-            
+
             Button {
                 camera.capturePhoto { image in
                     guard let image else { return }
-                    PhotoStore.shared.save(image: image, rule: guidance.suggestedRule)
+                    let entry = PhotoStore.shared.save(image: image, rule: guidance.suggestedRule)
                     captured = image
+                    capturedEntryID = entry.id
                     showCritique = true
                 }
             } label: {
                 ZStack {
-                    Circle().stroke(.white, lineWidth: 4).frame(width: 72, height: 72)
-                    Circle().fill(.white).frame(width: 60, height: 60)
+                    Circle().stroke(.white, lineWidth: 4).frame(width: 74, height: 74)
+                    Circle().fill(.white).frame(width: 62, height: 62)
                 }
             }
-            
-            Spacer()
-            NavigationHintGallery()
-        }
-        .padding(.horizontal, 16)
-    }
-    
-    private func requestAdvice() async {
-        guard let buffer = currentFrameBuffer else {
-            adviceError = "No camera frame available"
-            adviceLoading = false
-            return
-        }
-        
-        do {
-            let cards = try await AdviceService.getAdvice(
-                frameBuffer: buffer,
-                rule: guidance.suggestedRule,
-                subject: detector.subject
-            )
-            adviceCards = cards
-            tokenManager.useAdviceToken()
-            showAdviceModal = true
-        } catch {
-            adviceError = error.localizedDescription
-        }
-        adviceLoading = false
-    }
-}
 
-/// Small last-photo thumbnail linking to gallery tab (visual hint only).
-struct NavigationHintGallery: View {
-    @ObservedObject private var store = PhotoStore.shared
-    var body: some View {
-        Group {
-            if let last = store.entries.first, let thumb = store.thumbnail(for: last) {
-                Image(uiImage: thumb)
-                    .resizable().scaledToFill()
-                    .frame(width: 52, height: 52)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.4), lineWidth: 1))
-            } else {
-                Color.clear.frame(width: 52, height: 52)
+            Spacer()
+
+            Button {
+                withAnimation(.spring(duration: 0.3)) {
+                    partnerOn.toggle()
+                    if !partnerOn {
+                        partnerTip = nil
+                        partnerError = nil
+                        stillSince = nil
+                    }
+                }
+                Haptics.tap()
+            } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: partnerOn ? "person.wave.2.fill" : "person.wave.2")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(partnerOn ? .black : .white)
+                        .frame(width: 54, height: 54)
+                        .background(partnerOn ? gold : Color.white.opacity(0.15), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
+                    Text("Coach")
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(partnerOn ? gold : .white.opacity(0.8))
+                }
             }
         }
-        .frame(width: 64, height: 64)
+        .padding(.horizontal, 26)
+        .padding(.bottom, 24)
     }
-}
 
-extension CameraScreen {
+    private var galleryThumb: some View {
+        Group {
+            if let last = PhotoStore.shared.entries.first, let thumb = PhotoStore.shared.thumbnail(for: last) {
+                Image(uiImage: thumb)
+                    .resizable().scaledToFill()
+                    .frame(width: 54, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 11))
+                    .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.5), lineWidth: 1))
+            } else {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.system(size: 18))
+                    .foregroundColor(.white)
+                    .frame(width: 54, height: 54)
+                    .background(Color.white.opacity(0.15), in: RoundedRectangle(cornerRadius: 11))
+            }
+        }
+    }
+
+    private var permissionView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "camera.fill").font(.largeTitle)
+            Text("Camera access is off").font(.headline)
+            Text("Enable it in Settings → Apollo Cam").font(.caption).foregroundColor(.secondary)
+        }
+        .foregroundColor(.white)
+    }
+
+    // MARK: - Rule picker
+
     private var rulePicker: some View {
         NavigationView {
             List {
@@ -258,65 +421,5 @@ extension CameraScreen {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
-    }
-    
-    private var adviceSheet: some View {
-        NavigationView {
-            VStack(spacing: 16) {
-                if adviceLoading {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                        Text("Your coach is analyzing the scene…")
-                            .font(.footnote).foregroundColor(.secondary)
-                    }
-                    .padding(.top, 40)
-                } else if let error = adviceError {
-                    VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .foregroundColor(.orange).font(.title2)
-                        Text(error)
-                            .font(.footnote).multilineTextAlignment(.center)
-                        Button("Dismiss") { showAdviceModal = false }
-                            .buttonStyle(.borderedProminent).tint(gold)
-                    }
-                    .padding()
-                } else {
-                    ScrollView {
-                        VStack(spacing: 12) {
-                            ForEach(adviceCards) { card in
-                                adviceCardView(card)
-                            }
-                        }
-                        .padding()
-                    }
-                }
-                Spacer()
-            }
-            .navigationTitle("Coach's advice")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { showAdviceModal = false }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-    
-    private func adviceCardView(_ card: AdviceCard) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: card.icon)
-                    .foregroundColor(gold)
-                Text(card.title)
-                    .font(.headline)
-                Spacer()
-            }
-            Text(card.advice)
-                .font(.footnote)
-                .foregroundColor(.white.opacity(0.85))
-        }
-        .padding(14)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
     }
 }

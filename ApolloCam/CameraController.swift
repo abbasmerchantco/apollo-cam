@@ -1,5 +1,6 @@
 import AVFoundation
 import UIKit
+import CoreImage
 import Combine
 
 final class CameraController: NSObject, ObservableObject {
@@ -8,15 +9,28 @@ final class CameraController: NSObject, ObservableObject {
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "apollocam.session")
     private let analysisQueue = DispatchQueue(label: "apollocam.analysis", qos: .userInitiated)
+    private let ciContext = CIContext()
 
     @Published var permissionDenied = false
-    @Published var capturedImage: UIImage?
     @Published var zoomFactor: CGFloat = 1.0
+    /// 0 = perfectly still, higher = more movement. Updated ~5x/sec.
+    @Published var motionLevel: Double = 1.0
 
     private var device: AVCaptureDevice?
     private var lastAnalysis = Date.distantPast
+    private var previousLuma: [UInt8]?
+    /// Small snapshot of the most recent analyzed frame (safe to hold — it's a copy, not a camera buffer)
+    private(set) var latestSnapshot: UIImage?
+    private let snapshotLock = NSLock()
+
+    /// Called on the analysis queue with each throttled frame. Do NOT retain the buffer beyond this call.
     var onFrame: ((CVPixelBuffer) -> Void)?
-    private var photoContinuation: ((UIImage?) -> Void)?
+    private var photoCompletion: ((UIImage?) -> Void)?
+
+    func currentSnapshot() -> UIImage? {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return latestSnapshot
+    }
 
     func configure() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -76,19 +90,68 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func capturePhoto(completion: @escaping (UIImage?) -> Void) {
-        photoContinuation = completion
-        let settings = AVCapturePhotoSettings()
-        photoOutput.capturePhoto(with: settings, delegate: self)
+        photoCompletion = completion
+        photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
 }
 
 extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        // Throttle analysis to ~3 fps to keep the phone cool
-        guard Date().timeIntervalSince(lastAnalysis) > 0.33,
+        // Throttle to ~4 fps: enough for guidance, keeps the phone cool.
+        guard Date().timeIntervalSince(lastAnalysis) > 0.25,
               let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastAnalysis = Date()
+
+        // 1. Motion level from a tiny luma grid (cheap, no buffer retained)
+        updateMotion(from: buffer)
+
+        // 2. Small snapshot COPY for AI partner / advice (never the raw buffer)
+        makeSnapshot(from: buffer)
+
+        // 3. Subject detection (Vision reads the buffer synchronously inside this call)
         onFrame?(buffer)
+    }
+
+    private func updateMotion(from buffer: CVPixelBuffer) {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        let grid = 16
+        var luma = [UInt8](repeating: 0, count: grid * grid)
+        for gy in 0..<grid {
+            for gx in 0..<grid {
+                let x = (gx * width) / grid
+                let y = (gy * height) / grid
+                let o = y * stride + x * 4
+                luma[gy * grid + gx] = UInt8((Int(ptr[o]) + Int(ptr[o + 1]) + Int(ptr[o + 2])) / 3)
+            }
+        }
+
+        if let prev = previousLuma {
+            var total = 0
+            for i in 0..<luma.count { total += abs(Int(luma[i]) - Int(prev[i])) }
+            let level = Double(total) / Double(luma.count) / 255.0
+            DispatchQueue.main.async { self.motionLevel = level }
+        }
+        previousLuma = luma
+    }
+
+    private func makeSnapshot(from buffer: CVPixelBuffer) {
+        let ci = CIImage(cvPixelBuffer: buffer)
+        // Portrait orientation: camera buffers arrive rotated
+        let oriented = ci.oriented(.right)
+        let scale = 640.0 / max(oriented.extent.width, oriented.extent.height)
+        let scaled = oriented.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cg = ciContext.createCGImage(scaled, from: scaled.extent) else { return }
+        let image = UIImage(cgImage: cg)
+        snapshotLock.lock()
+        latestSnapshot = image
+        snapshotLock.unlock()
     }
 }
 
@@ -96,9 +159,8 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         let image = photo.fileDataRepresentation().flatMap { UIImage(data: $0) }
         DispatchQueue.main.async {
-            self.capturedImage = image
-            self.photoContinuation?(image)
-            self.photoContinuation = nil
+            self.photoCompletion?(image)
+            self.photoCompletion = nil
         }
     }
 }
