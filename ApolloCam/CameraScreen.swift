@@ -8,14 +8,12 @@ struct CameraScreen: View {
 
     // Composition
     @State private var selectedRule: CompositionRule? = nil   // nil = auto
-    @State private var guidance = Guidance(message: "Point at your subject", aligned: false, suggestedRule: .ruleOfThirds)
+    @State private var guidance = Guidance(message: "Point at your subject", tip: nil, aligned: false, suggestedRule: .ruleOfThirds, scene: .general)
     @State private var wasAligned = false
     @State private var showRulePicker = false
 
-    // Capture / critique
-    @State private var captured: UIImage?
-    @State private var capturedEntryID: UUID?
-    @State private var showCritique = false
+    // Capture review
+    @State private var reviewEntry: PhotoEntry?
 
     // Sheets
     @State private var showGallery = false
@@ -48,7 +46,7 @@ struct CameraScreen: View {
                                 .onEnded { value in
                                     let pt = CGPoint(x: value.location.x / geo.size.width,
                                                      y: value.location.y / geo.size.height)
-                                    detector.selectedPoint = pt
+                                    detector.select(at: pt)
                                     Haptics.tap()
                                 }
                         )
@@ -76,6 +74,7 @@ struct CameraScreen: View {
             .onReceive(detector.$subject) { _ in
                 let g = GuidanceEngine.evaluate(
                     subject: detector.subject,
+                    faceCount: detector.faceCount,
                     rule: selectedRule,
                     brightness: detector.brightness,
                     viewSize: geo.size)
@@ -88,10 +87,8 @@ struct CameraScreen: View {
         .sheet(isPresented: $showRulePicker) { rulePicker }
         .sheet(isPresented: $showGallery) { GalleryView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
-        .fullScreenCover(isPresented: $showCritique) {
-            if let img = captured {
-                CritiqueView(image: img, entryID: capturedEntryID)
-            }
+        .sheet(item: $reviewEntry) { entry in
+            CaptureReviewView(entry: entry)
         }
     }
 
@@ -178,17 +175,38 @@ struct CameraScreen: View {
     }
 
     private var guidanceStrip: some View {
-        HStack(spacing: 8) {
-            Image(systemName: guidance.aligned ? "checkmark.circle.fill" : "scope")
-                .foregroundColor(guidance.aligned ? .green : gold)
-            Text(guidance.message)
-                .font(.footnote.weight(.medium))
-                .foregroundColor(.white)
-                .lineLimit(1)
-            Spacer(minLength: 0)
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: guidance.aligned ? "checkmark.circle.fill" : "scope")
+                    .foregroundColor(guidance.aligned ? .green : gold)
+                Text(guidance.message)
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if guidance.scene != .general {
+                    Text(guidance.scene.rawValue)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(gold, in: Capsule())
+                }
+            }
+            if let tip = guidance.tip {
+                HStack(spacing: 6) {
+                    Image(systemName: "lightbulb.fill")
+                        .font(.caption2)
+                        .foregroundColor(gold.opacity(0.9))
+                    Text(tip)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
         }
-        .padding(.horizontal, 14).padding(.vertical, 9)
-        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal)
         .padding(.bottom, 8)
     }
@@ -256,7 +274,6 @@ struct CameraScreen: View {
         .animation(.spring(duration: 0.35), value: partnerTip)
     }
 
-    /// SF Symbol names from the model can be invalid; fall back gracefully.
     private func sanitizedIcon(_ name: String) -> String {
         UIImage(systemName: name) != nil ? name : "lightbulb.fill"
     }
@@ -268,7 +285,6 @@ struct CameraScreen: View {
             return
         }
 
-        // Hold-still gate: motion must stay low for 1.2s
         if camera.motionLevel < 0.045 {
             if stillSince == nil { stillSince = Date() }
         } else {
@@ -276,10 +292,7 @@ struct CameraScreen: View {
             return
         }
         guard let since = stillSince, Date().timeIntervalSince(since) > 1.2 else { return }
-
-        // Don't re-analyze the same held framing: minimum 6s between tips
         guard Date().timeIntervalSince(lastTipAt) > 6.0 else { return }
-
         guard let snapshot = camera.currentSnapshot() else { return }
 
         partnerLoading = true
@@ -325,9 +338,8 @@ struct CameraScreen: View {
                 camera.capturePhoto { image in
                     guard let image else { return }
                     let entry = PhotoStore.shared.save(image: image, rule: guidance.suggestedRule)
-                    captured = image
-                    capturedEntryID = entry.id
-                    showCritique = true
+                    reviewEntry = entry
+                    Haptics.tap()
                 }
             } label: {
                 ZStack {
@@ -421,5 +433,81 @@ struct CameraScreen: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - Capture review (Save to Photos / Evaluate)
+
+struct CaptureReviewView: View {
+    let entry: PhotoEntry
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var saved = false
+    @State private var showCritique = false
+
+    private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
+    private var image: UIImage? { PhotoStore.shared.image(for: entry) }
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 18) {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .padding(.horizontal)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        if let image {
+                            UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                            saved = true
+                            Haptics.success()
+                        }
+                    } label: {
+                        Label(saved ? "Saved" : "Save to Photos",
+                              systemImage: saved ? "checkmark.circle.fill" : "square.and.arrow.down")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(saved ? .green : gold)
+                    .foregroundColor(.black)
+                    .disabled(saved)
+
+                    Button {
+                        showCritique = true
+                    } label: {
+                        Label("Evaluate", systemImage: "sparkles")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(gold)
+                }
+                .padding(.horizontal)
+
+                Spacer()
+            }
+            .padding(.top)
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Your shot")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .fullScreenCover(isPresented: $showCritique) {
+            if let image {
+                CritiqueView(image: image, entryID: entry.id)
+            }
+        }
     }
 }

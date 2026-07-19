@@ -8,145 +8,172 @@ struct SubjectObservation: Equatable {
     /// Normalized rect, top-left origin (SwiftUI coordinate space)
     let box: CGRect
     var center: CGPoint { CGPoint(x: box.midX, y: box.midY) }
+    var area: CGFloat { box.width * box.height }
 }
 
-/// Detects and smoothly tracks the main subject.
-/// - Auto mode: faces > animals > salient objects, with temporal smoothing so the box glides instead of jumping.
-/// - Tap mode: the user taps a point; detection locks to whatever is at/near that point until cleared.
+enum SceneKind: String {
+    case portrait = "Portrait"
+    case landscape = "Landscape"
+    case macro = "Close-up"
+    case street = "Street"
+    case general = ""
+}
+
+/// Detects the main subject, then LOCKS ON with a real object tracker so the box
+/// follows that same subject across the frame while you recompose.
 final class SubjectDetector: ObservableObject {
     @Published var subject: SubjectObservation?
     @Published var brightness: Double = 0.5
-    /// Normalized tap point (top-left origin). When set, subject selection anchors to it.
+    @Published var faceCount: Int = 0
+    /// Normalized tap point (top-left origin). When set, selection anchors to it.
     @Published var selectedPoint: CGPoint?
 
     private let queue = DispatchQueue(label: "apollocam.vision", qos: .userInitiated)
 
-    // Temporal smoothing state
+    // Tracking state (Vision coordinates: bottom-left origin)
+    private var trackedObservation: VNDetectedObjectObservation?
+    private var sequenceHandler = VNSequenceRequestHandler()
+    private var trackLostFrames = 0
+    private var framesSinceReseed = 0
+
+    // Smoothing state (top-left coords)
     private var smoothedBox: CGRect?
     private var candidateBox: CGRect?
     private var candidateStreak = 0
     private var missStreak = 0
+    private var pendingAnchor: CGPoint?
 
     func clearSelection() {
-        selectedPoint = nil
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.trackedObservation = nil
+            self.sequenceHandler = VNSequenceRequestHandler()
+            self.pendingAnchor = nil
+            DispatchQueue.main.async { self.selectedPoint = nil }
+        }
+    }
+
+    func select(at point: CGPoint) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            // Drop the current lock and re-seed from whatever is at the tapped point
+            self.trackedObservation = nil
+            self.sequenceHandler = VNSequenceRequestHandler()
+            self.pendingAnchor = point
+            DispatchQueue.main.async { self.selectedPoint = point }
+        }
     }
 
     func analyze(_ pixelBuffer: CVPixelBuffer) {
-        // Read selection on whatever thread; CGPoint is a value type
-        let anchor = selectedPoint
-
         queue.async { [weak self] in
             guard let self else { return }
 
-            let saliency = VNGenerateObjectnessBasedSaliencyImageRequest()
-            let faces = VNDetectFaceRectanglesRequest()
-            let animals = VNRecognizeAnimalsRequest()
-
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
-            try? handler.perform([saliency, faces, animals])
-
-            // Collect every candidate box (normalized, bottom-left origin from Vision)
-            var candidates: [CGRect] = []
-            if let f = faces.results { candidates += f.map { $0.boundingBox } }
-            if let a = animals.results { candidates += a.map { $0.boundingBox } }
-            if let s = saliency.results?.first?.salientObjects { candidates += s.map { $0.boundingBox } }
-
-            // Convert to top-left origin
-            let topLeft: [CGRect] = candidates.map {
-                CGRect(x: $0.origin.x, y: 1 - $0.origin.y - $0.height, width: $0.width, height: $0.height)
-            }
-
-            let chosen: CGRect?
-            if let anchor {
-                // Locked mode: prefer a box containing the tap; else nearest within reach
-                if let containing = topLeft.filter({ $0.insetBy(dx: -0.03, dy: -0.03).contains(anchor) })
-                    .max(by: { $0.width * $0.height < $1.width * $1.height }) {
-                    chosen = containing
-                } else {
-                    let nearest = topLeft.min(by: {
-                        Self.dist(CGPoint(x: $0.midX, y: $0.midY), anchor) < Self.dist(CGPoint(x: $1.midX, y: $1.midY), anchor)
-                    })
-                    if let n = nearest, Self.dist(CGPoint(x: n.midX, y: n.midY), anchor) < 0.3 {
-                        chosen = n
-                    } else {
-                        // Nothing near the tap this frame — keep last known box briefly
-                        chosen = nil
-                    }
-                }
-            } else {
-                // Auto mode: faces beat animals beat saliency (order preserved above), pick largest of the first type present
-                if let f = faces.results, !f.isEmpty {
-                    chosen = f.map { CGRect(x: $0.boundingBox.origin.x, y: 1 - $0.boundingBox.origin.y - $0.boundingBox.height, width: $0.boundingBox.width, height: $0.boundingBox.height) }
-                        .max(by: { $0.width * $0.height < $1.width * $1.height })
-                } else if let a = animals.results, !a.isEmpty {
-                    chosen = a.map { CGRect(x: $0.boundingBox.origin.x, y: 1 - $0.boundingBox.origin.y - $0.boundingBox.height, width: $0.boundingBox.width, height: $0.boundingBox.height) }
-                        .max(by: { $0.width * $0.height < $1.width * $1.height })
-                } else {
-                    chosen = topLeft.max(by: { $0.width * $0.height < $1.width * $1.height })
-                }
-            }
-
             let bright = Self.averageBrightness(pixelBuffer)
-            let smoothed = self.smooth(chosen)
+
+            var resultTopLeft: CGRect?
+            var faces = 0
+
+            if let tracked = self.trackedObservation {
+                // TRACKING MODE: follow the locked subject
+                let request = VNTrackObjectRequest(detectedObjectObservation: tracked)
+                request.trackingLevel = .accurate
+                do {
+                    try self.sequenceHandler.perform([request], on: pixelBuffer, orientation: .right)
+                    self.framesSinceReseed += 1
+                    if let r = request.results?.first as? VNDetectedObjectObservation, r.confidence > 0.25 {
+                        self.trackedObservation = r
+                        self.trackLostFrames = 0
+                        let b = r.boundingBox
+                        resultTopLeft = CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height)
+                    } else {
+                        self.trackLostFrames += 1
+                    }
+                } catch {
+                    // Sequence handlers cap out after long tracks — reset and re-detect
+                    self.trackLostFrames = 99
+                }
+
+                // Lost it for ~2s (8 frames at 4fps) → back to searching
+                if self.trackLostFrames > 8 || self.framesSinceReseed > 400 {
+                    self.trackedObservation = nil
+                    self.sequenceHandler = VNSequenceRequestHandler()
+                }
+
+                // Cheap face count for scene detection every few frames
+                let faceReq = VNDetectFaceRectanglesRequest()
+                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right).perform([faceReq])
+                faces = faceReq.results?.count ?? 0
+            } else {
+                // SEARCH MODE: detect, then seed the tracker
+                let saliency = VNGenerateObjectnessBasedSaliencyImageRequest()
+                let faceReq = VNDetectFaceRectanglesRequest()
+                let animals = VNRecognizeAnimalsRequest()
+                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
+                    .perform([saliency, faceReq, animals])
+
+                faces = faceReq.results?.count ?? 0
+
+                // Candidates in Vision coords (bottom-left)
+                var vision: [CGRect] = []
+                if let f = faceReq.results, !f.isEmpty {
+                    vision = f.map { $0.boundingBox }
+                } else if let a = animals.results, !a.isEmpty {
+                    vision = a.map { $0.boundingBox }
+                } else if let s = saliency.results?.first?.salientObjects {
+                    vision = s.map { $0.boundingBox }
+                }
+
+                let chosenVision: CGRect?
+                if let anchor = self.pendingAnchor {
+                    // Anchor is top-left; convert candidates for distance test
+                    let anchored = vision.min(by: {
+                        let ca = CGPoint(x: $0.midX, y: 1 - $0.midY)
+                        let cb = CGPoint(x: $1.midX, y: 1 - $1.midY)
+                        return Self.dist(ca, anchor) < Self.dist(cb, anchor)
+                    })
+                    if let a = anchored {
+                        let c = CGPoint(x: a.midX, y: 1 - a.midY)
+                        chosenVision = Self.dist(c, anchor) < 0.35 ? a : nil
+                    } else { chosenVision = nil }
+                } else {
+                    chosenVision = vision.max(by: { $0.width * $0.height < $1.width * $1.height })
+                }
+
+                if let cv = chosenVision {
+                    // Seed the tracker with this subject
+                    self.trackedObservation = VNDetectedObjectObservation(boundingBox: cv)
+                    self.trackLostFrames = 0
+                    self.framesSinceReseed = 0
+                    self.pendingAnchor = nil
+                    resultTopLeft = CGRect(x: cv.origin.x, y: 1 - cv.origin.y - cv.height, width: cv.width, height: cv.height)
+                }
+            }
+
+            let smoothed = self.smooth(resultTopLeft)
 
             DispatchQueue.main.async {
                 self.brightness = bright
+                self.faceCount = faces
                 self.subject = smoothed.map { SubjectObservation(box: $0) }
             }
         }
     }
 
-    /// Temporal smoothing:
-    /// - New subjects must persist 3 consecutive frames before we switch to them (kills flicker).
-    /// - The displayed box eases toward the target (glide, not teleport).
-    /// - Lost subjects linger 4 frames before disappearing (kills blink-outs).
+    /// Glide the displayed box toward the tracked position; brief losses don't blink it out.
     private func smooth(_ raw: CGRect?) -> CGRect? {
         guard let raw else {
             missStreak += 1
-            if missStreak > 4 {
+            if missStreak > 5 {
                 smoothedBox = nil
-                candidateBox = nil
-                candidateStreak = 0
             }
             return smoothedBox
         }
         missStreak = 0
-
         guard let current = smoothedBox else {
-            // First detection: require a short streak before showing
-            if let cand = candidateBox, Self.iou(cand, raw) > 0.3 {
-                candidateStreak += 1
-            } else {
-                candidateBox = raw
-                candidateStreak = 1
-            }
-            if candidateStreak >= 2 {
-                smoothedBox = raw
-                candidateBox = nil
-                candidateStreak = 0
-            }
+            smoothedBox = raw
             return smoothedBox
         }
-
-        if Self.iou(current, raw) > 0.15 {
-            // Same subject: ease toward it
-            smoothedBox = Self.lerp(current, raw, 0.35)
-            candidateBox = nil
-            candidateStreak = 0
-        } else {
-            // Different subject: only switch after it persists
-            if let cand = candidateBox, Self.iou(cand, raw) > 0.3 {
-                candidateStreak += 1
-            } else {
-                candidateBox = raw
-                candidateStreak = 1
-            }
-            if candidateStreak >= 3 {
-                smoothedBox = raw
-                candidateBox = nil
-                candidateStreak = 0
-            }
-        }
+        smoothedBox = Self.lerp(current, raw, 0.45)
         return smoothedBox
     }
 
@@ -155,14 +182,6 @@ final class SubjectDetector: ObservableObject {
                y: a.origin.y + (b.origin.y - a.origin.y) * t,
                width: a.width + (b.width - a.width) * t,
                height: a.height + (b.height - a.height) * t)
-    }
-
-    private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        let inter = a.intersection(b)
-        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
-        let i = inter.width * inter.height
-        let u = a.width * a.height + b.width * b.height - i
-        return u > 0 ? i / u : 0
     }
 
     private static func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
@@ -194,29 +213,56 @@ final class SubjectDetector: ObservableObject {
     }
 }
 
+// MARK: - Scene detection (pure heuristics, zero cost)
+
+enum SceneDetector {
+    static func detect(subject: SubjectObservation?, faceCount: Int, brightness: Double) -> SceneKind {
+        if faceCount >= 2 { return .street }
+        if let s = subject {
+            if s.area > 0.5 { return .macro }
+            if faceCount == 1 && s.area > 0.12 { return .portrait }
+            if s.area < 0.07 { return .landscape }
+        } else {
+            return .landscape
+        }
+        return .general
+    }
+}
+
 // MARK: - Guidance engine (on-device, free)
 
 struct Guidance {
     let message: String
+    let tip: String?
     let aligned: Bool
     let suggestedRule: CompositionRule
+    let scene: SceneKind
 }
 
 enum GuidanceEngine {
-    static func evaluate(subject: SubjectObservation?, rule: CompositionRule?, brightness: Double, viewSize: CGSize) -> Guidance {
+    static func evaluate(subject: SubjectObservation?, faceCount: Int, rule: CompositionRule?, brightness: Double, viewSize: CGSize) -> Guidance {
+        let scene = SceneDetector.detect(subject: subject, faceCount: faceCount, brightness: brightness)
+
         guard let subject else {
-            return Guidance(message: "Point at your subject, or tap to select it", aligned: false, suggestedRule: rule ?? .ruleOfThirds)
+            return Guidance(
+                message: "Point at your subject, or tap to select it",
+                tip: passiveTip(subject: nil, scene: scene, brightness: brightness),
+                aligned: false,
+                suggestedRule: rule ?? suggestRule(for: nil, scene: scene),
+                scene: scene)
         }
 
-        let suggested = rule ?? suggestRule(for: subject)
+        let suggested = rule ?? suggestRule(for: subject, scene: scene)
         let subjectPx = CGPoint(x: subject.center.x * viewSize.width, y: subject.center.y * viewSize.height)
         let targets = suggested.targetPoints(in: viewSize)
         let nearest = targets.min(by: { $0.distance(to: subjectPx) < $1.distance(to: subjectPx) }) ?? subjectPx
         let dist = nearest.distance(to: subjectPx)
         let threshold = min(viewSize.width, viewSize.height) * 0.06
 
+        let tip = passiveTip(subject: subject, scene: scene, brightness: brightness)
+
         if dist < threshold {
-            return Guidance(message: "Subject aligned", aligned: true, suggestedRule: suggested)
+            return Guidance(message: "Subject aligned", tip: tip, aligned: true, suggestedRule: suggested, scene: scene)
         }
 
         let dx = nearest.x - subjectPx.x
@@ -224,19 +270,43 @@ enum GuidanceEngine {
         var directions: [String] = []
         if abs(dx) > threshold { directions.append(dx > 0 ? "right" : "left") }
         if abs(dy) > threshold { directions.append(dy > 0 ? "down" : "up") }
+        let msg = directions.isEmpty ? "Almost there" : "Frame subject \(directions.joined(separator: " and "))"
 
-        var msg = directions.isEmpty ? "Almost there" : "Frame subject \(directions.joined(separator: " and "))"
-        if brightness < 0.18 { msg += " · dark scene" }
-        else if brightness > 0.85 { msg += " · very bright" }
-
-        return Guidance(message: msg, aligned: false, suggestedRule: suggested)
+        return Guidance(message: msg, tip: tip, aligned: false, suggestedRule: suggested, scene: scene)
     }
 
-    static func suggestRule(for subject: SubjectObservation) -> CompositionRule {
-        let box = subject.box
-        if box.width * box.height > 0.35 { return .centeredCircle }
-        if abs(box.midX - 0.5) < 0.08 && box.width > 0.5 { return .symmetry }
-        if box.maxY > 0.75 && box.height < 0.35 { return .foregroundInterest }
+    /// Free, on-device shooting tips from simple heuristics. One at a time, priority-ordered.
+    static func passiveTip(subject: SubjectObservation?, scene: SceneKind, brightness: Double) -> String? {
+        if brightness < 0.15 { return "Very dark — find more light or brace the phone" }
+        if brightness > 0.88 { return "Very bright — angle away from the light source" }
+        if let s = subject {
+            if s.area < 0.04 { return "Subject is tiny — step closer or zoom in" }
+            if s.area > 0.75 { return "Very tight — step back for breathing room" }
+            let edge: CGFloat = 0.07
+            if s.box.minX < edge || s.box.maxX > 1 - edge || s.box.minY < edge || s.box.maxY > 1 - edge {
+                return "Subject is clipped — give it space from the edges"
+            }
+        }
+        switch scene {
+        case .landscape: return "Add foreground interest for depth"
+        case .portrait: return brightness < 0.45 ? "Turn your subject toward the light" : nil
+        case .street: return "Watch the layers — separate people from background"
+        case .macro: return "Hold very still — close shots amplify shake"
+        case .general: return nil
+        }
+    }
+
+    static func suggestRule(for subject: SubjectObservation?, scene: SceneKind) -> CompositionRule {
+        switch scene {
+        case .macro: return .centeredCircle
+        case .landscape: return .layering
+        case .street: return .leadingLines
+        case .portrait: return .ruleOfThirds
+        case .general: break
+        }
+        guard let s = subject else { return .ruleOfThirds }
+        if s.area > 0.35 { return .centeredCircle }
+        if abs(s.box.midX - 0.5) < 0.08 && s.box.width > 0.5 { return .symmetry }
         return .ruleOfThirds
     }
 }
@@ -249,10 +319,7 @@ extension CGPoint {
 
 enum Haptics {
     private static let generator = UINotificationFeedbackGenerator()
-    static func alignedPing() {
-        generator.notificationOccurred(.success)
-    }
-    static func tap() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    }
+    static func alignedPing() { generator.notificationOccurred(.success) }
+    static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
 }

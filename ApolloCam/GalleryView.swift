@@ -30,13 +30,20 @@ struct GalleryView: View {
                             ForEach(store.entries) { entry in
                                 Button { selected = entry } label: {
                                     ZStack(alignment: .bottomTrailing) {
-                                        if let thumb = store.thumbnail(for: entry) {
-                                            Image(uiImage: thumb)
-                                                .resizable().scaledToFill()
-                                                .frame(minWidth: 0, maxWidth: .infinity)
-                                                .aspectRatio(1, contentMode: .fill)
-                                                .clipped()
-                                        }
+                                        Color.clear
+                                            .aspectRatio(1, contentMode: .fit)
+                                            .overlay(
+                                                Group {
+                                                    if let thumb = store.thumbnail(for: entry) {
+                                                        Image(uiImage: thumb)
+                                                            .resizable()
+                                                            .scaledToFill()
+                                                    } else {
+                                                        Color.gray.opacity(0.2)
+                                                    }
+                                                }
+                                            )
+                                            .clipped()
                                         if let c = entry.critique {
                                             Text("\(c.overall)")
                                                 .font(.caption2.bold().monospaced())
