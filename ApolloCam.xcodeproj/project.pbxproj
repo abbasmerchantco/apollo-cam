@@ -19,6 +19,7 @@
 		B100000000000000000000AA /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AA /* SettingsView.swift */; };
 		B100000000000000000000AB /* AdviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AB /* AdviceService.swift */; };
 		B100000000000000000000AC /* TokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AC /* TokenManager.swift */; };
+		B100000000000000000000AD /* MLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AD /* MLModels.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		A100000000000000000000AA /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A100000000000000000000AB /* AdviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdviceService.swift; sourceTree = "<group>"; };
 		A100000000000000000000AC /* TokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenManager.swift; sourceTree = "<group>"; };
+		A100000000000000000000AD /* MLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLModels.swift; sourceTree = "<group>"; };
 		A100000000000000000000FF /* ApolloCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApolloCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -71,6 +73,7 @@
 				A100000000000000000000AA /* SettingsView.swift */,
 				A100000000000000000000AB /* AdviceService.swift */,
 				A100000000000000000000AC /* TokenManager.swift */,
+				A100000000000000000000AD /* MLModels.swift */,
 			);
 			path = ApolloCam;
 			sourceTree = "<group>";
@@ -93,6 +96,7 @@
 				C100000000000000000000F2 /* Sources */,
 				C100000000000000000000F1 /* Frameworks */,
 				C100000000000000000000F3 /* Resources */,
+				C100000000000000000000F4 /* Copy ML Models */,
 			);
 			buildRules = (
 			);
@@ -146,6 +150,23 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		C100000000000000000000F4 /* Copy ML Models */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Copy ML Models";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ -d \"$SRCROOT/ApolloCam/Models\" ]; then\n  for m in \"$SRCROOT/ApolloCam/Models/\"*.mlmodelc; do\n    [ -d \"$m\" ] && cp -R \"$m\" \"$TARGET_BUILD_DIR/$PRODUCT_NAME.app/\" && echo \"Copied $(basename $m)\"\n  done\nfi\nexit 0\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		C100000000000000000000F2 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -163,6 +184,7 @@
 				B100000000000000000000AA /* SettingsView.swift in Sources */,
 				B100000000000000000000AB /* AdviceService.swift in Sources */,
 				B100000000000000000000AC /* TokenManager.swift in Sources */,
+				B100000000000000000000AD /* MLModels.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

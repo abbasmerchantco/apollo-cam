@@ -1,0 +1,1 @@
+Drop YOLOv8n.mlmodelc and CompositionModel.mlmodelc folders here, then commit. The build copies them into the app automatically; the app falls back to Apple Vision detection + heuristics when they're absent.

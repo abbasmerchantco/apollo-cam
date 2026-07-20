@@ -8,7 +8,7 @@ struct CameraScreen: View {
 
     // Composition
     @State private var selectedRule: CompositionRule? = nil   // nil = auto
-    @State private var guidance = Guidance(message: "Point at your subject", tip: nil, aligned: false, suggestedRule: .ruleOfThirds, scene: .general)
+    @State private var guidance = Guidance(message: "Point at your subject", tip: nil, aligned: false, suggestedRule: .ruleOfThirds, ruleFromModel: false, scene: .general)
     @State private var wasAligned = false
     @State private var showRulePicker = false
 
@@ -74,7 +74,8 @@ struct CameraScreen: View {
             .onReceive(detector.$subject) { _ in
                 let g = GuidanceEngine.evaluate(
                     subject: detector.subject,
-                    faceCount: detector.faceCount,
+                    personCount: detector.personCount,
+                    modelRule: detector.modelRule,
                     rule: selectedRule,
                     brightness: detector.brightness,
                     viewSize: geo.size)
@@ -134,8 +135,15 @@ struct CameraScreen: View {
             Button { showRulePicker = true } label: {
                 HStack(spacing: 6) {
                     Image(systemName: guidance.suggestedRule.icon)
-                    Text(selectedRule == nil ? "Auto" : guidance.suggestedRule.rawValue)
+                    Text(selectedRule == nil ? (guidance.ruleFromModel ? guidance.suggestedRule.rawValue : "Auto") : guidance.suggestedRule.rawValue)
                         .font(.footnote.weight(.medium))
+                    if guidance.ruleFromModel && selectedRule == nil {
+                        Text("AI")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color(red: 0.98, green: 0.75, blue: 0.24), in: Capsule())
+                    }
                 }
                 .padding(.horizontal, 13).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: Capsule())

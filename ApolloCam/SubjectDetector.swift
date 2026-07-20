@@ -7,6 +7,7 @@ import UIKit
 struct SubjectObservation: Equatable {
     /// Normalized rect, top-left origin (SwiftUI coordinate space)
     let box: CGRect
+    let label: String?
     var center: CGPoint { CGPoint(x: box.midX, y: box.midY) }
     var area: CGFloat { box.width * box.height }
 }
@@ -19,36 +20,46 @@ enum SceneKind: String {
     case general = ""
 }
 
-/// Detects the main subject, then LOCKS ON with a real object tracker so the box
-/// follows that same subject across the frame while you recompose.
+private struct Detection {
+    let box: CGRect       // top-left origin, normalized
+    let label: String?
+    let confidence: Float
+}
+
+/// GudoCam-style pipeline:
+///  1. YOLOv8n (your model) detects people/animals/objects each frame — falls back to
+///     Vision faces/animals/saliency until the model is dropped in.
+///  2. Identity association: the locked subject is matched frame-to-frame by overlap,
+///     so the box follows the SAME subject while you recompose.
+///  3. CompositionModel (your model) classifies the framing into one of the 14 types —
+///     falls back to scene heuristics until dropped in.
 final class SubjectDetector: ObservableObject {
     @Published var subject: SubjectObservation?
     @Published var brightness: Double = 0.5
-    @Published var faceCount: Int = 0
-    /// Normalized tap point (top-left origin). When set, selection anchors to it.
+    @Published var personCount: Int = 0
     @Published var selectedPoint: CGPoint?
+    /// Composition predicted by the CompositionModel (nil = model absent or unsure)
+    @Published var modelRule: CompositionRule?
+    @Published var modelRuleConfidence: Double = 0
 
     private let queue = DispatchQueue(label: "apollocam.vision", qos: .userInitiated)
 
-    // Tracking state (Vision coordinates: bottom-left origin)
-    private var trackedObservation: VNDetectedObjectObservation?
-    private var sequenceHandler = VNSequenceRequestHandler()
-    private var trackLostFrames = 0
-    private var framesSinceReseed = 0
-
-    // Smoothing state (top-left coords)
-    private var smoothedBox: CGRect?
-    private var candidateBox: CGRect?
-    private var candidateStreak = 0
-    private var missStreak = 0
+    // Identity lock (top-left coords)
+    private var lockedBox: CGRect?
+    private var coastFrames = 0
     private var pendingAnchor: CGPoint?
+
+    // Smoothing
+    private var smoothedBox: CGRect?
+
+    // Composition classification throttle
+    private var framesSinceClassify = 99
 
     func clearSelection() {
         queue.async { [weak self] in
             guard let self else { return }
-            self.trackedObservation = nil
-            self.sequenceHandler = VNSequenceRequestHandler()
             self.pendingAnchor = nil
+            self.lockedBox = nil
             DispatchQueue.main.async { self.selectedPoint = nil }
         }
     }
@@ -56,10 +67,8 @@ final class SubjectDetector: ObservableObject {
     func select(at point: CGPoint) {
         queue.async { [weak self] in
             guard let self else { return }
-            // Drop the current lock and re-seed from whatever is at the tapped point
-            self.trackedObservation = nil
-            self.sequenceHandler = VNSequenceRequestHandler()
             self.pendingAnchor = point
+            self.lockedBox = nil
             DispatchQueue.main.async { self.selectedPoint = point }
         }
     }
@@ -69,103 +78,128 @@ final class SubjectDetector: ObservableObject {
             guard let self else { return }
 
             let bright = Self.averageBrightness(pixelBuffer)
+            let detections = self.detect(pixelBuffer)
+            let people = detections.filter { ($0.label ?? "").lowercased().contains("person") }.count
+                + (MLModels.shared.yoloAvailable ? 0 : detections.filter { $0.label == "face" }.count)
 
-            var resultTopLeft: CGRect?
-            var faces = 0
-
-            if let tracked = self.trackedObservation {
-                // TRACKING MODE: follow the locked subject
-                let request = VNTrackObjectRequest(detectedObjectObservation: tracked)
-                request.trackingLevel = .accurate
-                do {
-                    try self.sequenceHandler.perform([request], on: pixelBuffer, orientation: .right)
-                    self.framesSinceReseed += 1
-                    if let r = request.results?.first as? VNDetectedObjectObservation, r.confidence > 0.25 {
-                        self.trackedObservation = r
-                        self.trackLostFrames = 0
-                        let b = r.boundingBox
-                        resultTopLeft = CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height)
-                    } else {
-                        self.trackLostFrames += 1
-                    }
-                } catch {
-                    // Sequence handlers cap out after long tracks — reset and re-detect
-                    self.trackLostFrames = 99
-                }
-
-                // Lost it for ~2s (8 frames at 4fps) → back to searching
-                if self.trackLostFrames > 8 || self.framesSinceReseed > 400 {
-                    self.trackedObservation = nil
-                    self.sequenceHandler = VNSequenceRequestHandler()
-                }
-
-                // Cheap face count for scene detection every few frames
-                let faceReq = VNDetectFaceRectanglesRequest()
-                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right).perform([faceReq])
-                faces = faceReq.results?.count ?? 0
+            // ---- Identity association ----
+            var chosen: Detection?
+            if let anchor = self.pendingAnchor {
+                chosen = detections
+                    .filter { Self.dist(CGPoint(x: $0.box.midX, y: $0.box.midY), anchor) < 0.35 || $0.box.insetBy(dx: -0.03, dy: -0.03).contains(anchor) }
+                    .max(by: { $0.confidence < $1.confidence })
+                if chosen != nil { self.pendingAnchor = nil }
+            } else if let locked = self.lockedBox {
+                chosen = detections
+                    .map { ($0, Self.iou($0.box, locked)) }
+                    .filter { $0.1 > 0.05 }
+                    .max(by: { $0.1 < $1.1 })?.0
             } else {
-                // SEARCH MODE: detect, then seed the tracker
-                let saliency = VNGenerateObjectnessBasedSaliencyImageRequest()
-                let faceReq = VNDetectFaceRectanglesRequest()
-                let animals = VNRecognizeAnimalsRequest()
-                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
-                    .perform([saliency, faceReq, animals])
+                chosen = detections.max(by: { score($0) < score($1) })
+            }
 
-                faces = faceReq.results?.count ?? 0
+            func score(_ d: Detection) -> Float {
+                var s = d.confidence * Float(d.box.width * d.box.height + 0.15)
+                if let l = d.label?.lowercased(), l.contains("person") || l == "face" { s *= 2.2 }
+                return s
+            }
 
-                // Candidates in Vision coords (bottom-left)
-                var vision: [CGRect] = []
-                if let f = faceReq.results, !f.isEmpty {
-                    vision = f.map { $0.boundingBox }
-                } else if let a = animals.results, !a.isEmpty {
-                    vision = a.map { $0.boundingBox }
-                } else if let s = saliency.results?.first?.salientObjects {
-                    vision = s.map { $0.boundingBox }
-                }
+            if let c = chosen {
+                self.lockedBox = c.box
+                self.coastFrames = 0
+            } else if self.lockedBox != nil {
+                // Coast briefly through missed detections, then release
+                self.coastFrames += 1
+                if self.coastFrames > 6 { self.lockedBox = nil }
+            }
 
-                let chosenVision: CGRect?
-                if let anchor = self.pendingAnchor {
-                    // Anchor is top-left; convert candidates for distance test
-                    let anchored = vision.min(by: {
-                        let ca = CGPoint(x: $0.midX, y: 1 - $0.midY)
-                        let cb = CGPoint(x: $1.midX, y: 1 - $1.midY)
-                        return Self.dist(ca, anchor) < Self.dist(cb, anchor)
-                    })
-                    if let a = anchored {
-                        let c = CGPoint(x: a.midX, y: 1 - a.midY)
-                        chosenVision = Self.dist(c, anchor) < 0.35 ? a : nil
-                    } else { chosenVision = nil }
-                } else {
-                    chosenVision = vision.max(by: { $0.width * $0.height < $1.width * $1.height })
-                }
+            let smoothed = self.smooth(self.lockedBox)
+            let label = chosen?.label
 
-                if let cv = chosenVision {
-                    // Seed the tracker with this subject
-                    self.trackedObservation = VNDetectedObjectObservation(boundingBox: cv)
-                    self.trackLostFrames = 0
-                    self.framesSinceReseed = 0
-                    self.pendingAnchor = nil
-                    resultTopLeft = CGRect(x: cv.origin.x, y: 1 - cv.origin.y - cv.height, width: cv.width, height: cv.height)
+            // ---- Composition classification (~1x/sec) ----
+            self.framesSinceClassify += 1
+            var newRule: CompositionRule? = nil
+            var newConf: Double = 0
+            var classified = false
+            if self.framesSinceClassify >= 4, let comp = MLModels.shared.composition {
+                classified = true
+                self.framesSinceClassify = 0
+                let req = VNCoreMLRequest(model: comp)
+                req.imageCropAndScaleOption = .scaleFill
+                try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right).perform([req])
+                if let top = (req.results as? [VNClassificationObservation])?.first,
+                   top.confidence > 0.35,
+                   let rule = MLModels.rule(fromLabel: top.identifier) {
+                    newRule = rule
+                    newConf = Double(top.confidence)
                 }
             }
 
-            let smoothed = self.smooth(resultTopLeft)
-
             DispatchQueue.main.async {
                 self.brightness = bright
-                self.faceCount = faces
-                self.subject = smoothed.map { SubjectObservation(box: $0) }
+                self.personCount = people
+                self.subject = smoothed.map { SubjectObservation(box: $0, label: label) }
+                if classified {
+                    self.modelRule = newRule
+                    self.modelRuleConfidence = newConf
+                }
             }
         }
     }
 
-    /// Glide the displayed box toward the tracked position; brief losses don't blink it out.
+    // MARK: - Detection (YOLO first, Vision fallback)
+
+    private func detect(_ pixelBuffer: CVPixelBuffer) -> [Detection] {
+        if let yolo = MLModels.shared.yolo {
+            let request = VNCoreMLRequest(model: yolo)
+            request.imageCropAndScaleOption = .scaleFill
+            try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right).perform([request])
+            if let results = request.results as? [VNRecognizedObjectObservation] {
+                return results.compactMap { obs in
+                    guard obs.confidence > 0.35 else { return nil }
+                    let b = obs.boundingBox
+                    return Detection(
+                        box: CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height),
+                        label: obs.labels.first?.identifier,
+                        confidence: obs.confidence)
+                }
+            }
+            return []
+        }
+
+        // Fallback: faces > animals > saliency
+        let saliency = VNGenerateObjectnessBasedSaliencyImageRequest()
+        let faces = VNDetectFaceRectanglesRequest()
+        let animals = VNRecognizeAnimalsRequest()
+        try? VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
+            .perform([saliency, faces, animals])
+
+        var out: [Detection] = []
+        for f in faces.results ?? [] {
+            let b = f.boundingBox
+            out.append(Detection(box: CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height),
+                                 label: "face", confidence: f.confidence))
+        }
+        for a in animals.results ?? [] {
+            let b = a.boundingBox
+            out.append(Detection(box: CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height),
+                                 label: a.labels.first?.identifier ?? "animal", confidence: a.confidence))
+        }
+        for s in saliency.results?.first?.salientObjects ?? [] {
+            let b = s.boundingBox
+            out.append(Detection(box: CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height),
+                                 label: nil, confidence: s.confidence))
+        }
+        return out
+    }
+
+    // MARK: - Smoothing
+
+    private var missStreak = 0
     private func smooth(_ raw: CGRect?) -> CGRect? {
         guard let raw else {
             missStreak += 1
-            if missStreak > 5 {
-                smoothedBox = nil
-            }
+            if missStreak > 5 { smoothedBox = nil }
             return smoothedBox
         }
         missStreak = 0
@@ -182,6 +216,14 @@ final class SubjectDetector: ObservableObject {
                y: a.origin.y + (b.origin.y - a.origin.y) * t,
                width: a.width + (b.width - a.width) * t,
                height: a.height + (b.height - a.height) * t)
+    }
+
+    private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+        let i = inter.width * inter.height
+        let u = a.width * a.height + b.width * b.height - i
+        return u > 0 ? i / u : 0
     }
 
     private static func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
@@ -213,14 +255,15 @@ final class SubjectDetector: ObservableObject {
     }
 }
 
-// MARK: - Scene detection (pure heuristics, zero cost)
+// MARK: - Scene detection (free heuristics)
 
 enum SceneDetector {
-    static func detect(subject: SubjectObservation?, faceCount: Int, brightness: Double) -> SceneKind {
-        if faceCount >= 2 { return .street }
+    static func detect(subject: SubjectObservation?, personCount: Int, brightness: Double) -> SceneKind {
+        if personCount >= 2 { return .street }
         if let s = subject {
             if s.area > 0.5 { return .macro }
-            if faceCount == 1 && s.area > 0.12 { return .portrait }
+            let isPerson = (s.label ?? "").lowercased().contains("person") || s.label == "face"
+            if (personCount == 1 || isPerson) && s.area > 0.12 { return .portrait }
             if s.area < 0.07 { return .landscape }
         } else {
             return .landscape
@@ -229,40 +272,49 @@ enum SceneDetector {
     }
 }
 
-// MARK: - Guidance engine (on-device, free)
+// MARK: - Guidance engine
 
 struct Guidance {
     let message: String
     let tip: String?
     let aligned: Bool
     let suggestedRule: CompositionRule
+    let ruleFromModel: Bool
     let scene: SceneKind
 }
 
 enum GuidanceEngine {
-    static func evaluate(subject: SubjectObservation?, faceCount: Int, rule: CompositionRule?, brightness: Double, viewSize: CGSize) -> Guidance {
-        let scene = SceneDetector.detect(subject: subject, faceCount: faceCount, brightness: brightness)
+    static func evaluate(subject: SubjectObservation?, personCount: Int, modelRule: CompositionRule?,
+                         rule: CompositionRule?, brightness: Double, viewSize: CGSize) -> Guidance {
+        let scene = SceneDetector.detect(subject: subject, personCount: personCount, brightness: brightness)
 
-        guard let subject else {
-            return Guidance(
-                message: "Point at your subject, or tap to select it",
-                tip: passiveTip(subject: nil, scene: scene, brightness: brightness),
-                aligned: false,
-                suggestedRule: rule ?? suggestRule(for: nil, scene: scene),
-                scene: scene)
+        // Priority: manual override > CompositionModel prediction > heuristics
+        let suggested: CompositionRule
+        let fromModel: Bool
+        if let rule {
+            suggested = rule; fromModel = false
+        } else if let modelRule {
+            suggested = modelRule; fromModel = true
+        } else {
+            suggested = suggestRule(for: subject, scene: scene); fromModel = false
         }
 
-        let suggested = rule ?? suggestRule(for: subject, scene: scene)
+        let tip = passiveTip(subject: subject, scene: scene, brightness: brightness)
+
+        guard let subject else {
+            return Guidance(message: "Point at your subject, or tap to select it",
+                            tip: tip, aligned: false, suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
+        }
+
         let subjectPx = CGPoint(x: subject.center.x * viewSize.width, y: subject.center.y * viewSize.height)
         let targets = suggested.targetPoints(in: viewSize)
         let nearest = targets.min(by: { $0.distance(to: subjectPx) < $1.distance(to: subjectPx) }) ?? subjectPx
         let dist = nearest.distance(to: subjectPx)
         let threshold = min(viewSize.width, viewSize.height) * 0.06
 
-        let tip = passiveTip(subject: subject, scene: scene, brightness: brightness)
-
         if dist < threshold {
-            return Guidance(message: "Subject aligned", tip: tip, aligned: true, suggestedRule: suggested, scene: scene)
+            return Guidance(message: "Subject aligned", tip: tip, aligned: true,
+                            suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
         }
 
         let dx = nearest.x - subjectPx.x
@@ -272,10 +324,10 @@ enum GuidanceEngine {
         if abs(dy) > threshold { directions.append(dy > 0 ? "down" : "up") }
         let msg = directions.isEmpty ? "Almost there" : "Frame subject \(directions.joined(separator: " and "))"
 
-        return Guidance(message: msg, tip: tip, aligned: false, suggestedRule: suggested, scene: scene)
+        return Guidance(message: msg, tip: tip, aligned: false,
+                        suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
     }
 
-    /// Free, on-device shooting tips from simple heuristics. One at a time, priority-ordered.
     static func passiveTip(subject: SubjectObservation?, scene: SceneKind, brightness: Double) -> String? {
         if brightness < 0.15 { return "Very dark — find more light or brace the phone" }
         if brightness > 0.88 { return "Very bright — angle away from the light source" }

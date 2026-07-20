@@ -43,10 +43,11 @@ enum AdviceService {
             let h = s.center.x < 0.4 ? "left" : (s.center.x > 0.6 ? "right" : "center")
             let v = s.center.y < 0.4 ? "top" : (s.center.y > 0.6 ? "bottom" : "middle")
             let size = Int(s.box.width * s.box.height * 100)
+            let what = s.label.map { " (detected as: \($0))" } ?? ""
             if userSelectedSubject {
-                subjectLine = "IMPORTANT: The user has explicitly tapped their intended subject. It sits at the \(v)-\(h) of the frame and fills roughly \(size)% of it. All advice must serve THIS subject."
+                subjectLine = "IMPORTANT: The user has explicitly tapped their intended subject\(what). It sits at the \(v)-\(h) of the frame and fills roughly \(size)% of it. All advice must serve THIS subject."
             } else {
-                subjectLine = "Auto-detected likely subject at the \(v)-\(h) of the frame, filling roughly \(size)% of it."
+                subjectLine = "Auto-detected likely subject\(what) at the \(v)-\(h) of the frame, filling roughly \(size)% of it."
             }
         }
 
