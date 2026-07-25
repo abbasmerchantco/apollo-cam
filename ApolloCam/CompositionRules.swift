@@ -96,9 +96,11 @@ enum CompositionRule: String, CaseIterable, Identifiable, Codable {
 struct CompositionOverlay: View {
     let rule: CompositionRule
     let aligned: Bool
+    /// Normalized (0–1) subject centre. When set, converging overlays aim here.
+    var focusPoint: CGPoint? = nil
 
     private var lineColor: Color {
-        aligned ? Color.green.opacity(0.9) : Color(red: 0.98, green: 0.62, blue: 0.2).opacity(0.85)
+        aligned ? Color.green.opacity(0.95) : Color(red: 0.0, green: 0.9, blue: 1.0).opacity(0.9)
     }
 
     var body: some View {
@@ -141,7 +143,7 @@ struct CompositionOverlay: View {
                     p.move(to: CGPoint(x: w / 2, y: 0)); p.addLine(to: CGPoint(x: w / 2, y: h))
                     p.move(to: CGPoint(x: 0, y: h / 2)); p.addLine(to: CGPoint(x: w, y: h / 2))
                 case .leadingLines:
-                    let focal = CGPoint(x: w / 2, y: h * 0.4)
+                    let focal = focusPoint.map { CGPoint(x: $0.x * w, y: $0.y * h) } ?? CGPoint(x: w / 2, y: h * 0.4)
                     for corner in [CGPoint(x: 0, y: h), CGPoint(x: w, y: h), CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0)] {
                         p.move(to: corner); p.addLine(to: focal)
                     }
@@ -164,12 +166,13 @@ struct CompositionOverlay: View {
                     p.move(to: CGPoint(x: 0, y: h * 0.55)); p.addLine(to: CGPoint(x: w, y: h * 0.55))
                     p.move(to: CGPoint(x: 0, y: h * 0.85)); p.addLine(to: CGPoint(x: w, y: h * 0.85))
                 case .vanishingPoint:
-                    let vp = CGPoint(x: w / 2, y: h * 0.45)
+                    let vp = focusPoint.map { CGPoint(x: $0.x * w, y: $0.y * h) } ?? CGPoint(x: w / 2, y: h * 0.45)
                     for edge in [CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0), CGPoint(x: 0, y: h * 0.3),
                                  CGPoint(x: w, y: h * 0.3), CGPoint(x: 0, y: h), CGPoint(x: w, y: h),
                                  CGPoint(x: 0, y: h * 0.75), CGPoint(x: w, y: h * 0.75)] {
                         p.move(to: edge); p.addLine(to: vp)
                     }
+                    p.addEllipse(in: CGRect(x: vp.x - 4, y: vp.y - 4, width: 8, height: 8))
                 case .sCurve:
                     p.move(to: CGPoint(x: w * 0.2, y: h * 0.95))
                     p.addCurve(to: CGPoint(x: w * 0.8, y: h * 0.05),
@@ -177,7 +180,7 @@ struct CompositionOverlay: View {
                                control2: CGPoint(x: -w * 0.05, y: h * 0.35))
                 }
             }
-            .stroke(lineColor, style: StrokeStyle(lineWidth: 1.2, dash: rule == .leadingLines || rule == .vanishingPoint ? [6, 4] : []))
+            .stroke(lineColor, style: StrokeStyle(lineWidth: 1.8, dash: rule == .leadingLines || rule == .vanishingPoint ? [7, 4] : []))
 
             ForEach(Array(rule.targetPoints(in: geo.size).enumerated()), id: \.offset) { _, pt in
                 Circle()

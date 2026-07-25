@@ -8,6 +8,14 @@ struct PhotoEntry: Codable, Identifiable {
     var critique: Critique?
     var isImported: Bool = false
 
+    // Optional shot metadata (nil for older entries / imports).
+    var pixelWidth: Int? = nil
+    var pixelHeight: Int? = nil
+    var zoom: Double? = nil
+    var aperture: Double? = nil
+    var shutter: Double? = nil
+    var iso: Int? = nil
+
     var filename: String { "\(id.uuidString).jpg" }
 }
 
@@ -54,8 +62,11 @@ final class PhotoStore: ObservableObject {
     }
 
     @discardableResult
-    func save(image: UIImage, rule: CompositionRule?, imported: Bool = false) -> PhotoEntry {
-        let entry = PhotoEntry(id: UUID(), date: Date(), rule: rule, critique: nil, isImported: imported)
+    func save(image: UIImage, rule: CompositionRule?, imported: Bool = false, info: ShotInfo? = nil) -> PhotoEntry {
+        let entry = PhotoEntry(id: UUID(), date: Date(), rule: rule, critique: nil, isImported: imported,
+                               pixelWidth: info?.pixelWidth, pixelHeight: info?.pixelHeight,
+                               zoom: info?.zoom, aperture: info?.aperture,
+                               shutter: info?.shutter, iso: info?.iso)
         if let data = image.jpegData(compressionQuality: 0.88) {
             try? data.write(to: dir.appendingPathComponent(entry.filename))
         }
@@ -75,6 +86,15 @@ final class PhotoStore: ObservableObject {
         entries.removeAll { $0.id == entry.id }
         thumbCache.removeObject(forKey: entry.id.uuidString as NSString)
         persist()
+    }
+
+    /// Overwrite the stored JPEG after an edit, and drop the stale thumbnail.
+    func replaceImage(_ image: UIImage, for entry: PhotoEntry) {
+        if let data = image.jpegData(compressionQuality: 0.92) {
+            try? data.write(to: dir.appendingPathComponent(entry.filename))
+        }
+        thumbCache.removeObject(forKey: entry.id.uuidString as NSString)
+        objectWillChange.send()
     }
 
     func image(for entry: PhotoEntry) -> UIImage? {
