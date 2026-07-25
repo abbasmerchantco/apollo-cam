@@ -20,6 +20,8 @@
 		B100000000000000000000AB /* AdviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AB /* AdviceService.swift */; };
 		B100000000000000000000AC /* TokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AC /* TokenManager.swift */; };
 		B100000000000000000000AD /* MLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000AD /* MLModels.swift */; };
+		B1000000000000000000000AF /* AdjustService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000AF /* AdjustService.swift */; };
+		B1000000000000000000000AE /* PhotoEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000AE /* PhotoEditor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +38,8 @@
 		A100000000000000000000AB /* AdviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdviceService.swift; sourceTree = "<group>"; };
 		A100000000000000000000AC /* TokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenManager.swift; sourceTree = "<group>"; };
 		A100000000000000000000AD /* MLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLModels.swift; sourceTree = "<group>"; };
+		A1000000000000000000000AF /* AdjustService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustService.swift; sourceTree = "<group>"; };
+		A1000000000000000000000AE /* PhotoEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoEditor.swift; sourceTree = "<group>"; };
 		A100000000000000000000FF /* ApolloCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApolloCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -74,6 +78,8 @@
 				A100000000000000000000AB /* AdviceService.swift */,
 				A100000000000000000000AC /* TokenManager.swift */,
 				A100000000000000000000AD /* MLModels.swift */,
+				A1000000000000000000000AF /* AdjustService.swift */,
+				A1000000000000000000000AE /* PhotoEditor.swift */,
 			);
 			path = ApolloCam;
 			sourceTree = "<group>";
@@ -185,6 +191,8 @@
 				B100000000000000000000AB /* AdviceService.swift in Sources */,
 				B100000000000000000000AC /* TokenManager.swift in Sources */,
 				B100000000000000000000AD /* MLModels.swift in Sources */,
+				B1000000000000000000000AF /* AdjustService.swift in Sources */,
+				B1000000000000000000000AE /* PhotoEditor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -245,7 +253,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2;
+				MARKETING_VERSION = 0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = co.abbasmerchant.apollocam;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -271,7 +279,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2;
+				MARKETING_VERSION = 0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = co.abbasmerchant.apollocam;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
