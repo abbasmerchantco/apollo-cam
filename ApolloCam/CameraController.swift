@@ -2,6 +2,7 @@ import AVFoundation
 import UIKit
 import CoreImage
 import Combine
+import ImageIO
 
 final class CameraController: NSObject, ObservableObject {
     let session = AVCaptureSession()
@@ -13,6 +14,11 @@ final class CameraController: NSObject, ObservableObject {
 
     @Published var permissionDenied = false
     @Published var zoomFactor: CGFloat = 1.0
+    /// Highest zoom the active device supports (capped for usability).
+    @Published var maxZoom: CGFloat = 5.0
+    /// True while a sheet covers the camera — frames are dropped.
+    @Published var isPaused = false
+    private var configured = false
     /// 0 = perfectly still, higher = more movement. Updated ~5x/sec.
     @Published var motionLevel: Double = 1.0
 
@@ -25,7 +31,7 @@ final class CameraController: NSObject, ObservableObject {
 
     /// Called on the analysis queue with each throttled frame. Do NOT retain the buffer beyond this call.
     var onFrame: ((CVPixelBuffer) -> Void)?
-    private var photoCompletion: ((UIImage?) -> Void)?
+    private var photoCompletion: ((UIImage?, ShotInfo?) -> Void)?
 
     func currentSnapshot() -> UIImage? {
         snapshotLock.lock(); defer { snapshotLock.unlock() }
@@ -68,6 +74,9 @@ final class CameraController: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
 
             session.commitConfiguration()
+            configured = true
+            let maxZ = min(cam.activeFormat.videoMaxZoomFactor, 10)
+            DispatchQueue.main.async { self.maxZoom = max(2, maxZ) }
             session.startRunning()
         }
     }
@@ -75,6 +84,23 @@ final class CameraController: NSObject, ObservableObject {
     func stop() {
         sessionQueue.async { [self] in
             if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    /// Suspend capture while a sheet covers the camera. Stops frame delivery, so
+    /// detection, haptics and coach polling all go quiet and stop drawing power.
+    func pause() {
+        DispatchQueue.main.async { self.isPaused = true }
+        sessionQueue.async { [self] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    func resume() {
+        DispatchQueue.main.async { self.isPaused = false }
+        sessionQueue.async { [self] in
+            guard configured else { return }
+            if !session.isRunning { session.startRunning() }
         }
     }
 
@@ -89,16 +115,28 @@ final class CameraController: NSObject, ObservableObject {
         } catch {}
     }
 
-    func capturePhoto(completion: @escaping (UIImage?) -> Void) {
+    func capturePhoto(completion: @escaping (UIImage?, ShotInfo?) -> Void) {
         photoCompletion = completion
         photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
 }
 
+/// Technical facts about a captured frame, surfaced on the review screen.
+struct ShotInfo {
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+    var zoom: Double?
+    var aperture: Double?      // f-number
+    var shutter: Double?       // seconds
+    var iso: Int?
+}
+
 extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         // Throttle to ~4 fps: enough for guidance, keeps the phone cool.
-        guard Date().timeIntervalSince(lastAnalysis) > 0.25,
+        // Paused (a sheet is covering the camera) → do no work at all.
+        guard !isPaused,
+              Date().timeIntervalSince(lastAnalysis) > 0.25,
               let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastAnalysis = Date()
 
@@ -158,8 +196,29 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 extension CameraController: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         let image = photo.fileDataRepresentation().flatMap { UIImage(data: $0) }
+
+        var info = ShotInfo()
+        info.zoom = Double(zoomFactor)
+        if let px = photo.pixelBuffer {
+            info.pixelWidth = CVPixelBufferGetWidth(px)
+            info.pixelHeight = CVPixelBufferGetHeight(px)
+        }
+        let meta = photo.metadata
+        if let w = meta[kCGImagePropertyPixelWidth as String] as? Int { info.pixelWidth = w }
+        if let h = meta[kCGImagePropertyPixelHeight as String] as? Int { info.pixelHeight = h }
+        if let img = image, info.pixelWidth == nil {
+            info.pixelWidth = Int(img.size.width * img.scale)
+            info.pixelHeight = Int(img.size.height * img.scale)
+        }
+        if let exif = meta[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+            if let f = exif[kCGImagePropertyExifFNumber as String] as? Double { info.aperture = f }
+            if let t = exif[kCGImagePropertyExifExposureTime as String] as? Double { info.shutter = t }
+            if let isoArr = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [Int], let iso = isoArr.first { info.iso = iso }
+            else if let iso = exif[kCGImagePropertyExifISOSpeedRatings as String] as? Int { info.iso = iso }
+        }
+
         DispatchQueue.main.async {
-            self.photoCompletion?(image)
+            self.photoCompletion?(image, info)
             self.photoCompletion = nil
         }
     }

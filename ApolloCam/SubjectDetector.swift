@@ -12,12 +12,28 @@ struct SubjectObservation: Equatable {
     var area: CGFloat { box.width * box.height }
 }
 
-enum SceneKind: String {
+enum SceneKind: String, CaseIterable, Identifiable {
     case portrait = "Portrait"
     case landscape = "Landscape"
     case macro = "Close-up"
     case street = "Street"
     case general = ""
+
+    var id: String { rawValue }
+
+    /// Scenes the user can force from the on-screen selector (plus an Auto option in the UI).
+    static let selectable: [SceneKind] = [.landscape, .portrait, .street, .macro]
+
+    /// Short uppercase label for the selector pills.
+    var pill: String {
+        switch self {
+        case .portrait: return "PORTRAIT"
+        case .landscape: return "LANDSCAPE"
+        case .macro: return "MACRO"
+        case .street: return "STREET"
+        case .general: return "AUTO"
+        }
+    }
 }
 
 private struct Detection {
@@ -274,36 +290,53 @@ enum SceneDetector {
 
 // MARK: - Guidance engine
 
+/// A single stacked coaching card (icon + coloured title + one-line body).
+struct SceneTip: Identifiable, Equatable {
+    let title: String
+    let body: String
+    let icon: String   // SF Symbol
+    var id: String { title + body }
+}
+
 struct Guidance {
     let message: String
-    let tip: String?
+    let tip: String?              // kept for compatibility; first tip's body
+    let tips: [SceneTip]          // 2–3 stacked cards
     let aligned: Bool
     let suggestedRule: CompositionRule
     let ruleFromModel: Bool
     let scene: SceneKind
+    let sceneFromUser: Bool       // true when the user forced the scene
+    let focusPoint: CGPoint?      // normalized subject centre, for converging overlays
 }
 
 enum GuidanceEngine {
     static func evaluate(subject: SubjectObservation?, personCount: Int, modelRule: CompositionRule?,
-                         rule: CompositionRule?, brightness: Double, viewSize: CGSize) -> Guidance {
-        let scene = SceneDetector.detect(subject: subject, personCount: personCount, brightness: brightness)
+                         rule: CompositionRule?, sceneOverride: SceneKind?,
+                         brightness: Double, viewSize: CGSize) -> Guidance {
+        let autoScene = SceneDetector.detect(subject: subject, personCount: personCount, brightness: brightness)
+        let scene = sceneOverride ?? autoScene
+        let sceneFromUser = sceneOverride != nil
 
-        // Priority: manual override > CompositionModel prediction > heuristics
+        // Priority: manual rule override > CompositionModel prediction > scene heuristics
         let suggested: CompositionRule
         let fromModel: Bool
         if let rule {
             suggested = rule; fromModel = false
-        } else if let modelRule {
+        } else if let modelRule, sceneOverride == nil {
             suggested = modelRule; fromModel = true
         } else {
             suggested = suggestRule(for: subject, scene: scene); fromModel = false
         }
 
-        let tip = passiveTip(subject: subject, scene: scene, brightness: brightness)
+        let focus = subject?.center
+        let tips = sceneTips(subject: subject, scene: scene, rule: suggested, brightness: brightness)
 
         guard let subject else {
             return Guidance(message: "Point at your subject, or tap to select it",
-                            tip: tip, aligned: false, suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
+                            tip: tips.first?.body, tips: tips, aligned: false,
+                            suggestedRule: suggested, ruleFromModel: fromModel,
+                            scene: scene, sceneFromUser: sceneFromUser, focusPoint: nil)
         }
 
         let subjectPx = CGPoint(x: subject.center.x * viewSize.width, y: subject.center.y * viewSize.height)
@@ -313,8 +346,9 @@ enum GuidanceEngine {
         let threshold = min(viewSize.width, viewSize.height) * 0.06
 
         if dist < threshold {
-            return Guidance(message: "Subject aligned", tip: tip, aligned: true,
-                            suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
+            return Guidance(message: "Subject aligned", tip: tips.first?.body, tips: tips, aligned: true,
+                            suggestedRule: suggested, ruleFromModel: fromModel,
+                            scene: scene, sceneFromUser: sceneFromUser, focusPoint: focus)
         }
 
         let dx = nearest.x - subjectPx.x
@@ -324,35 +358,69 @@ enum GuidanceEngine {
         if abs(dy) > threshold { directions.append(dy > 0 ? "down" : "up") }
         let msg = directions.isEmpty ? "Almost there" : "Frame subject \(directions.joined(separator: " and "))"
 
-        return Guidance(message: msg, tip: tip, aligned: false,
-                        suggestedRule: suggested, ruleFromModel: fromModel, scene: scene)
+        return Guidance(message: msg, tip: tips.first?.body, tips: tips, aligned: false,
+                        suggestedRule: suggested, ruleFromModel: fromModel,
+                        scene: scene, sceneFromUser: sceneFromUser, focusPoint: focus)
     }
 
-    static func passiveTip(subject: SubjectObservation?, scene: SceneKind, brightness: Double) -> String? {
-        if brightness < 0.15 { return "Very dark — find more light or brace the phone" }
-        if brightness > 0.88 { return "Very bright — angle away from the light source" }
-        if let s = subject {
-            if s.area < 0.04 { return "Subject is tiny — step closer or zoom in" }
-            if s.area > 0.75 { return "Very tight — step back for breathing room" }
-            let edge: CGFloat = 0.07
-            if s.box.minX < edge || s.box.maxX > 1 - edge || s.box.minY < edge || s.box.maxY > 1 - edge {
-                return "Subject is clipped — give it space from the edges"
+    /// Builds 2–3 stacked cards from scene + subject + lighting. Ordered by priority.
+    static func sceneTips(subject: SubjectObservation?, scene: SceneKind,
+                          rule: CompositionRule, brightness: Double) -> [SceneTip] {
+        var tips: [SceneTip] = []
+
+        // 1. Composition card (always present) — tied to the active rule.
+        tips.append(SceneTip(title: "Composition", body: rule.hint, icon: rule.icon))
+
+        // 2. Scene-specific framing card.
+        switch scene {
+        case .landscape:
+            tips.append(SceneTip(title: "Depth",
+                                 body: "Add a foreground anchor and keep the horizon off-centre",
+                                 icon: "mountain.2.fill"))
+        case .portrait:
+            tips.append(SceneTip(title: "Eye level",
+                                 body: "Put the eyes on the upper third for a natural gaze",
+                                 icon: "eye.fill"))
+        case .street:
+            tips.append(SceneTip(title: "Layers",
+                                 body: "Separate your subject from the background clutter",
+                                 icon: "square.3.layers.3d"))
+        case .macro:
+            tips.append(SceneTip(title: "Stability",
+                                 body: "Brace the phone — close shots amplify every shake",
+                                 icon: "hand.raised.fill"))
+        case .general:
+            if let s = subject, s.area < 0.06 {
+                tips.append(SceneTip(title: "Fill the frame",
+                                     body: "Step closer or zoom so the subject reads clearly",
+                                     icon: "arrow.up.left.and.arrow.down.right"))
             }
         }
-        switch scene {
-        case .landscape: return "Add foreground interest for depth"
-        case .portrait: return brightness < 0.45 ? "Turn your subject toward the light" : nil
-        case .street: return "Watch the layers — separate people from background"
-        case .macro: return "Hold very still — close shots amplify shake"
-        case .general: return nil
+
+        // 3. Lighting / framing hygiene card (only when it actually applies).
+        if brightness < 0.15 {
+            tips.append(SceneTip(title: "Lighting", body: "Very dark — find more light or brace the phone", icon: "moon.fill"))
+        } else if brightness > 0.88 {
+            tips.append(SceneTip(title: "Lighting", body: "Very bright — angle away from the light source", icon: "sun.max.fill"))
+        } else if let s = subject {
+            let edge: CGFloat = 0.07
+            if s.box.minX < edge || s.box.maxX > 1 - edge || s.box.minY < edge || s.box.maxY > 1 - edge {
+                tips.append(SceneTip(title: "Edges", body: "Subject is clipped — give it space from the edges", icon: "rectangle.dashed"))
+            } else if s.area > 0.75 {
+                tips.append(SceneTip(title: "Breathing room", body: "Very tight — step back a little", icon: "arrow.down.right.and.arrow.up.left"))
+            } else if scene == .portrait && brightness < 0.45 {
+                tips.append(SceneTip(title: "Light", body: "Turn your subject toward the light", icon: "lightbulb.fill"))
+            }
         }
+
+        return Array(tips.prefix(3))
     }
 
     static func suggestRule(for subject: SubjectObservation?, scene: SceneKind) -> CompositionRule {
         switch scene {
         case .macro: return .centeredCircle
         case .landscape: return .layering
-        case .street: return .leadingLines
+        case .street: return .vanishingPoint
         case .portrait: return .ruleOfThirds
         case .general: break
         }

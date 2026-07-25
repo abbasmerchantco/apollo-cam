@@ -5,6 +5,8 @@ struct CoachTip: Identifiable, Equatable {
     let title: String
     let advice: String
     let icon: String
+    /// What Claude actually sees — shown so you can tell instantly if it misread the scene.
+    let scene: String?
 }
 
 enum AdviceError: LocalizedError {
@@ -38,39 +40,48 @@ enum AdviceService {
             throw AdviceError.parseFailure
         }
 
-        var subjectLine = "No subject has been identified yet."
+        // The on-device detector only knows 80 COCO classes — it has no idea what a
+        // bridge, river, ridgeline or building is. So its output is offered as a WEAK
+        // hint that Claude is explicitly told to override. Claude does the seeing.
+        var hintLine = "The on-device detector found nothing it recognises. That is expected for landscapes, architecture and water — identify the scene yourself."
         if let s = subject {
             let h = s.center.x < 0.4 ? "left" : (s.center.x > 0.6 ? "right" : "center")
             let v = s.center.y < 0.4 ? "top" : (s.center.y > 0.6 ? "bottom" : "middle")
             let size = Int(s.box.width * s.box.height * 100)
-            let what = s.label.map { " (detected as: \($0))" } ?? ""
+            let what = s.label.map { " and guessed it might be a \($0)" } ?? ""
             if userSelectedSubject {
-                subjectLine = "IMPORTANT: The user has explicitly tapped their intended subject\(what). It sits at the \(v)-\(h) of the frame and fills roughly \(size)% of it. All advice must serve THIS subject."
+                hintLine = "The user TAPPED a region at the \(v)-\(h) of the frame (about \(size)% of the image)\(what). Treat that location as what they care about, but trust your own eyes about WHAT it actually is — the label is often wrong."
             } else {
-                subjectLine = "Auto-detected likely subject\(what) at the \(v)-\(h) of the frame, filling roughly \(size)% of it."
+                hintLine = "A weak automatic guess put something at the \(v)-\(h) of the frame, about \(size)% of the image\(what). This guess is frequently wrong — override it if you see a better subject."
             }
         }
 
         let prompt = """
-You are a professional photographer coaching over the user's shoulder as they line up a shot on an iPhone.
+You are a professional photographer standing at the user's shoulder as they line up a shot on an iPhone. You can see exactly what their camera sees.
 
-\(subjectLine)
-The on-screen composition guide is currently: \(rule.rawValue).
+\(hintLine)
 
-Look at the frame and give the SINGLE highest-impact instruction to improve this shot right now. Consider composition, camera angle, distance, lighting direction, exposure, distracting elements, and timing — but pick only the ONE change that matters most.
+The on-screen composition guide is currently set to: \(rule.rawValue). If that guide is wrong for this scene, say so in your advice.
+
+Work in two steps.
+
+STEP 1 — Look at the image and identify what is actually in front of you. Name the real scene concretely: what the subject is, the setting, the light, and the notable structures or natural features (for example "stone bridge over a river, overcast, trees both banks" or "woman on a bench, backlit by low sun"). Be specific about things an object detector would miss: water, bridges, buildings, mountains, roads, horizons, reflections, leading lines.
+
+STEP 2 — Given that scene, give the SINGLE highest-impact change to improve this shot right now. Consider viewpoint, height, distance, where the natural lines lead, horizon placement, light direction, exposure, clutter and timing — then pick only the ONE thing that matters most.
 
 Rules for the advice:
-- Concrete and physical: what to DO ("crouch lower", "step two paces left", "put the sun behind her")
-- Max 14 words
-- No jargon, no explanations, no gear suggestions
+- Concrete and physical: what to DO ("crouch to water level", "step left so the bridge cuts the corner", "wait for the sun off the railing")
+- It must clearly refer to something you actually see in THIS frame, not generic advice
+- Max 16 words
+- No jargon, no gear suggestions, no explanation of why
 
 Respond with ONLY this JSON, no code fences, no preamble:
-{"title": "<one word category e.g. Angle, Light, Distance, Framing, Clutter, Timing>", "advice": "<the instruction>", "icon": "<one SF Symbol name that fits, e.g. arrow.down.circle, sun.max, arrow.left.and.right, viewfinder, trash, clock>"}
+{"scene": "<6-10 words naming what you actually see>", "title": "<one word category e.g. Angle, Light, Distance, Framing, Clutter, Timing, Horizon>", "advice": "<the instruction>", "icon": "<one SF Symbol name that fits, e.g. arrow.down.circle, sun.max, arrow.left.and.right, viewfinder, trash, clock, water.waves, mountain.2>"}
 """
 
         let body: [String: Any] = [
             "model": CritiqueService.model,
-            "max_tokens": 200,
+            "max_tokens": 300,
             "messages": [[
                 "role": "user",
                 "content": [
@@ -108,11 +119,16 @@ Respond with ONLY this JSON, no code fences, no preamble:
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        struct TipData: Decodable { let title: String; let advice: String; let icon: String }
+        struct TipData: Decodable {
+            let title: String
+            let advice: String
+            let icon: String
+            let scene: String?
+        }
         guard let d = cleaned.data(using: .utf8),
               let tip = try? JSONDecoder().decode(TipData.self, from: d) else {
             throw AdviceError.parseFailure
         }
-        return CoachTip(title: tip.title, advice: tip.advice, icon: tip.icon)
+        return CoachTip(title: tip.title, advice: tip.advice, icon: tip.icon, scene: tip.scene)
     }
 }

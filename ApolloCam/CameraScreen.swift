@@ -8,7 +8,11 @@ struct CameraScreen: View {
 
     // Composition
     @State private var selectedRule: CompositionRule? = nil   // nil = auto
-    @State private var guidance = Guidance(message: "Point at your subject", tip: nil, aligned: false, suggestedRule: .ruleOfThirds, ruleFromModel: false, scene: .general)
+    @State private var sceneOverride: SceneKind? = nil        // nil = auto-detect
+    @State private var guidance = Guidance(message: "Point at your subject", tip: nil, tips: [],
+                                           aligned: false, suggestedRule: .ruleOfThirds,
+                                           ruleFromModel: false, scene: .general,
+                                           sceneFromUser: false, focusPoint: nil)
     @State private var wasAligned = false
     @State private var showRulePicker = false
 
@@ -18,6 +22,9 @@ struct CameraScreen: View {
     // Sheets
     @State private var showGallery = false
     @State private var showSettings = false
+
+    // Zoom
+    @State private var pinchStartZoom: CGFloat = 1.0
 
     // AI Partner
     @State private var partnerOn = false
@@ -29,6 +36,12 @@ struct CameraScreen: View {
     private let heartbeat = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
+    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
+
+    /// Any sheet covering the camera means we should stop capturing entirely.
+    private var anySheetPresented: Bool {
+        showGallery || showSettings || showRulePicker || reviewEntry != nil
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -50,8 +63,19 @@ struct CameraScreen: View {
                                     Haptics.tap()
                                 }
                         )
+                        .simultaneousGesture(
+                            MagnificationGesture()
+                                .onChanged { scale in
+                                    camera.setZoom(pinchStartZoom * scale)
+                                }
+                                .onEnded { _ in
+                                    pinchStartZoom = camera.zoomFactor
+                                }
+                        )
 
-                    CompositionOverlay(rule: guidance.suggestedRule, aligned: guidance.aligned)
+                    CompositionOverlay(rule: guidance.suggestedRule,
+                                       aligned: guidance.aligned,
+                                       focusPoint: guidance.focusPoint)
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
 
@@ -61,7 +85,9 @@ struct CameraScreen: View {
                         topBar
                         Spacer()
                         if partnerOn { partnerCard }
-                        guidanceStrip
+                        tipStack
+                        zoomSlider
+                        sceneSelector
                         bottomBar
                     }
                 }
@@ -69,14 +95,28 @@ struct CameraScreen: View {
             .onAppear {
                 camera.configure()
                 camera.onFrame = { buffer in detector.analyze(buffer) }
+                pinchStartZoom = camera.zoomFactor
             }
             .onDisappear { camera.stop() }
+            .onChange(of: anySheetPresented) { covered in
+                if covered {
+                    // Sheet came up: stop the session, drop the subject lock, silence the coach.
+                    camera.pause()
+                    detector.clearSelection()
+                    stillSince = nil
+                    wasAligned = false
+                } else {
+                    camera.resume()
+                }
+            }
             .onReceive(detector.$subject) { _ in
+                guard !camera.isPaused else { return }
                 let g = GuidanceEngine.evaluate(
                     subject: detector.subject,
                     personCount: detector.personCount,
                     modelRule: detector.modelRule,
                     rule: selectedRule,
+                    sceneOverride: sceneOverride,
                     brightness: detector.brightness,
                     viewSize: geo.size)
                 if g.aligned && !wasAligned { Haptics.alignedPing() }
@@ -105,9 +145,7 @@ struct CameraScreen: View {
                 height: subject.box.height * size.height)
 
             ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(guidance.aligned ? .green : gold,
-                            style: StrokeStyle(lineWidth: 2, dash: detector.selectedPoint == nil ? [6, 5] : []))
+                CornerBrackets(aligned: guidance.aligned)
 
                 if detector.selectedPoint != nil {
                     Button {
@@ -120,6 +158,16 @@ struct CameraScreen: View {
                             .background(Circle().fill(.black.opacity(0.5)))
                     }
                     .offset(x: 10, y: -10)
+                }
+
+                if let label = subject.label {
+                    Text(label.capitalized)
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(guidance.aligned ? Color.green : cyan, in: Capsule())
+                        .offset(y: -22)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .frame(width: box.width, height: box.height)
@@ -142,17 +190,13 @@ struct CameraScreen: View {
                             .font(.caption2.weight(.bold))
                             .foregroundColor(.black)
                             .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color(red: 0.98, green: 0.75, blue: 0.24), in: Capsule())
+                            .background(gold, in: Capsule())
                     }
                 }
                 .padding(.horizontal, 13).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: Capsule())
             }
             .foregroundColor(.white)
-
-            Spacer()
-
-            zoomControl
 
             Spacer()
 
@@ -168,25 +212,14 @@ struct CameraScreen: View {
         .padding(.top, 8)
     }
 
-    private var zoomControl: some View {
-        HStack(spacing: 2) {
-            ForEach([1.0, 2.0, 5.0], id: \.self) { z in
-                Button { camera.setZoom(z) } label: {
-                    Text(z == 1.0 ? "1×" : String(format: "%.0f×", z))
-                        .font(.caption.weight(abs(camera.zoomFactor - z) < 0.3 ? .bold : .regular))
-                        .foregroundColor(abs(camera.zoomFactor - z) < 0.3 ? gold : .white)
-                        .padding(.horizontal, 9).padding(.vertical, 7)
-                }
-            }
-        }
-        .background(.ultraThinMaterial, in: Capsule())
-    }
+    // MARK: - Stacked tip cards
 
-    private var guidanceStrip: some View {
-        VStack(spacing: 6) {
+    private var tipStack: some View {
+        VStack(spacing: 7) {
+            // Alignment status always leads.
             HStack(spacing: 8) {
                 Image(systemName: guidance.aligned ? "checkmark.circle.fill" : "scope")
-                    .foregroundColor(guidance.aligned ? .green : gold)
+                    .foregroundColor(guidance.aligned ? .green : cyan)
                 Text(guidance.message)
                     .font(.footnote.weight(.medium))
                     .foregroundColor(.white)
@@ -197,26 +230,98 @@ struct CameraScreen: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundColor(.black)
                         .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(gold, in: Capsule())
+                        .background(guidance.sceneFromUser ? gold : cyan, in: Capsule())
                 }
             }
-            if let tip = guidance.tip {
-                HStack(spacing: 6) {
-                    Image(systemName: "lightbulb.fill")
-                        .font(.caption2)
-                        .foregroundColor(gold.opacity(0.9))
-                    Text(tip)
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(1)
+            .padding(.horizontal, 13).padding(.vertical, 9)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+
+            ForEach(guidance.tips) { tip in
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: tip.icon)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(cyan)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tip.title)
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(cyan)
+                        Text(tip.body)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Spacer(minLength: 0)
                 }
+                .padding(.horizontal, 13).padding(.vertical, 9)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal)
         .padding(.bottom, 8)
+        .animation(.easeInOut(duration: 0.2), value: guidance.tips)
+    }
+
+    // MARK: - Zoom slider
+
+    private var zoomSlider: some View {
+        HStack(spacing: 10) {
+            Text("1×")
+                .font(.caption2)
+                .foregroundColor(cyan.opacity(0.9))
+            Slider(
+                value: Binding(
+                    get: { Double(camera.zoomFactor) },
+                    set: { camera.setZoom(CGFloat($0)); pinchStartZoom = CGFloat($0) }
+                ),
+                in: 1...Double(camera.maxZoom)
+            )
+            .tint(cyan)
+            Text(String(format: "%.0f×", camera.maxZoom))
+                .font(.caption2)
+                .foregroundColor(cyan.opacity(0.9))
+            Text(String(format: "%.1f×", camera.zoomFactor))
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundColor(cyan)
+                .frame(width: 38, alignment: .trailing)
+        }
+        .padding(.horizontal, 13).padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Scene selector
+
+    private var sceneSelector: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                scenePill(title: "AUTO", active: sceneOverride == nil) {
+                    sceneOverride = nil
+                }
+                ForEach(SceneKind.selectable) { kind in
+                    scenePill(title: kind.pill, active: sceneOverride == kind) {
+                        sceneOverride = (sceneOverride == kind) ? nil : kind
+                    }
+                }
+            }
+            .padding(.horizontal)
+        }
+        .padding(.bottom, 10)
+    }
+
+    private func scenePill(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            Haptics.tap()
+        } label: {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(active ? .black : .white.opacity(0.7))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(active ? cyan : Color.white.opacity(0.12), in: Capsule())
+                .overlay(Capsule().stroke(active ? .clear : .white.opacity(0.2), lineWidth: 1))
+        }
     }
 
     // MARK: - AI Partner
@@ -249,6 +354,12 @@ struct CameraScreen: View {
                             .font(.subheadline.weight(.medium))
                             .foregroundColor(.white)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let scene = tip.scene, !scene.isEmpty {
+                            Text("Sees: \(scene)")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.55))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     Spacer(minLength: 0)
                     if partnerLoading { ProgressView().tint(gold.opacity(0.6)).scaleEffect(0.8) }
@@ -287,20 +398,21 @@ struct CameraScreen: View {
     }
 
     private func partnerHeartbeat() {
-        guard partnerOn, !partnerLoading else { return }
+        // No coaching while a sheet covers the camera — the frame is stale anyway.
+        guard partnerOn, !partnerLoading, !camera.isPaused, !anySheetPresented else { return }
         guard tokenManager.canUseAdvice else {
             partnerError = "Out of coaching tokens for today"
             return
         }
 
-        if camera.motionLevel < 0.045 {
+        if camera.motionLevel < 0.05 {
             if stillSince == nil { stillSince = Date() }
         } else {
             stillSince = nil
             return
         }
-        guard let since = stillSince, Date().timeIntervalSince(since) > 1.2 else { return }
-        guard Date().timeIntervalSince(lastTipAt) > 6.0 else { return }
+        guard let since = stillSince, Date().timeIntervalSince(since) > 0.9 else { return }
+        guard Date().timeIntervalSince(lastTipAt) > 4.5 else { return }
         guard let snapshot = camera.currentSnapshot() else { return }
 
         partnerLoading = true
@@ -343,9 +455,11 @@ struct CameraScreen: View {
             Spacer()
 
             Button {
-                camera.capturePhoto { image in
+                camera.capturePhoto { image, info in
                     guard let image else { return }
-                    let entry = PhotoStore.shared.save(image: image, rule: guidance.suggestedRule)
+                    let entry = PhotoStore.shared.save(image: image,
+                                                       rule: guidance.suggestedRule,
+                                                       info: info)
                     reviewEntry = entry
                     Haptics.tap()
                 }
@@ -444,7 +558,39 @@ struct CameraScreen: View {
     }
 }
 
-// MARK: - Capture review (Save to Photos / Evaluate)
+// MARK: - Viewfinder-style corner brackets
+
+struct CornerBrackets: View {
+    let aligned: Bool
+    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            let len = min(w, h) * 0.26
+            Path { p in
+                // top-left
+                p.move(to: CGPoint(x: 0, y: len)); p.addLine(to: CGPoint(x: 0, y: 0)); p.addLine(to: CGPoint(x: len, y: 0))
+                // top-right
+                p.move(to: CGPoint(x: w - len, y: 0)); p.addLine(to: CGPoint(x: w, y: 0)); p.addLine(to: CGPoint(x: w, y: len))
+                // bottom-right
+                p.move(to: CGPoint(x: w, y: h - len)); p.addLine(to: CGPoint(x: w, y: h)); p.addLine(to: CGPoint(x: w - len, y: h))
+                // bottom-left
+                p.move(to: CGPoint(x: len, y: h)); p.addLine(to: CGPoint(x: 0, y: h)); p.addLine(to: CGPoint(x: 0, y: h - len))
+            }
+            .stroke(aligned ? Color.green : cyan, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+        }
+    }
+}
+
+// MARK: - Capture review
+
+/// One label/value pair in the review screen's metadata strip.
+struct MetaItem: Identifiable {
+    let label: String
+    let value: String
+    var id: String { label }
+}
 
 struct CaptureReviewView: View {
     let entry: PhotoEntry
@@ -452,70 +598,200 @@ struct CaptureReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var saved = false
     @State private var showCritique = false
+    @State private var showEditor = false
+    @State private var displayImage: UIImage?
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
-    private var image: UIImage? { PhotoStore.shared.image(for: entry) }
+    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 18) {
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                        .padding(.horizontal)
-                }
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                HStack(spacing: 12) {
-                    Button {
-                        if let image {
-                            UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
-                            saved = true
-                            Haptics.success()
-                        }
-                    } label: {
-                        Label(saved ? "Saved" : "Save to Photos",
-                              systemImage: saved ? "checkmark.circle.fill" : "square.and.arrow.down")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
+            VStack(spacing: 0) {
+                // Photo — the screen is mostly the image.
+                ZStack {
+                    if let image = displayImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                    } else {
+                        ProgressView().tint(.white)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(saved ? .green : gold)
-                    .foregroundColor(.black)
-                    .disabled(saved)
-
-                    Button {
-                        showCritique = true
-                    } label: {
-                        Label("Evaluate", systemImage: "sparkles")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(gold)
                 }
-                .padding(.horizontal)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                Spacer()
-            }
-            .padding(.top)
-            .background(Color.black.ignoresSafeArea())
-            .navigationTitle("Your shot")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
+                metadataRow
+
+                actionRow
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear { if displayImage == nil { displayImage = PhotoStore.shared.image(for: entry) } }
         .fullScreenCover(isPresented: $showCritique) {
-            if let image {
+            if let image = displayImage {
                 CritiqueView(image: image, entryID: entry.id)
             }
         }
+        .fullScreenCover(isPresented: $showEditor) {
+            PhotoEditorView(entry: entry) { edited in
+                PhotoStore.shared.replaceImage(edited, for: entry)
+                displayImage = edited
+                saved = false
+            }
+        }
+    }
+
+    // Horizontal strip so metadata costs almost no vertical space.
+    private var metadataRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 20) {
+                ForEach(metadataItems) { item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.label)
+                            .font(.system(size: 9))
+                            .foregroundColor(.white.opacity(0.5))
+                        Text(item.value)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .fixedSize()
+                }
+            }
+            .padding(.horizontal, 18)
+        }
+        .padding(.vertical, 12)
+        .background(Color.white.opacity(0.05))
+    }
+
+    private var metadataItems: [MetaItem] {
+        var out: [MetaItem] = []
+
+        if let w = entry.pixelWidth, let h = entry.pixelHeight {
+            out.append(MetaItem(label: "Resolution", value: "\(w)×\(h)"))
+            out.append(MetaItem(label: "Ratio", value: aspectLabel(w: w, h: h)))
+        } else if let img = displayImage {
+            let w = Int(img.size.width * img.scale), h = Int(img.size.height * img.scale)
+            out.append(MetaItem(label: "Resolution", value: "\(w)×\(h)"))
+            out.append(MetaItem(label: "Ratio", value: aspectLabel(w: w, h: h)))
+        }
+
+        if let rule = entry.rule {
+            out.append(MetaItem(label: "Composition", value: rule.rawValue))
+        }
+        if let z = entry.zoom {
+            out.append(MetaItem(label: "Zoom", value: String(format: "%.1f×", z)))
+        }
+        if let a = entry.aperture {
+            out.append(MetaItem(label: "Aperture", value: String(format: "f/%.1f", a)))
+        }
+        if let s = entry.shutter, s > 0 {
+            out.append(MetaItem(label: "Shutter", value: s >= 1 ? String(format: "%.1fs", s) : "1/\(Int((1/s).rounded()))s"))
+        }
+        if let iso = entry.iso {
+            out.append(MetaItem(label: "ISO", value: "\(iso)"))
+        }
+        out.append(MetaItem(label: "Taken", value: entry.date.formatted(date: .omitted, time: .shortened)))
+        return out
+    }
+
+    private func aspectLabel(w: Int, h: Int) -> String {
+        guard w > 0, h > 0 else { return "—" }
+        func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
+        let g = gcd(max(w, h), min(w, h))
+        var rw = w / g, rh = h / g
+        // Collapse awkward ratios like 4032:3024 → 4:3
+        if rw > 20 || rh > 20 {
+            let r = Double(w) / Double(h)
+            let common: [(Double, String)] = [(4.0/3, "4:3"), (3.0/4, "3:4"), (16.0/9, "16:9"),
+                                              (9.0/16, "9:16"), (1, "1:1"), (3.0/2, "3:2"), (2.0/3, "2:3")]
+            if let best = common.min(by: { abs($0.0 - r) < abs($1.0 - r) }), abs(best.0 - r) < 0.04 {
+                return best.1
+            }
+            rw = Int((r * 10).rounded()); rh = 10
+        }
+        return "\(rw):\(rh)"
+    }
+
+    private var actionRow: some View {
+        HStack {
+            // Bottom left: AI review
+            Button {
+                showCritique = true
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(gold)
+                        .frame(width: 46, height: 46)
+                        .background(gold.opacity(0.18), in: RoundedRectangle(cornerRadius: 11))
+                        .overlay(RoundedRectangle(cornerRadius: 11).stroke(gold.opacity(0.45), lineWidth: 1))
+                    Text("AI review")
+                        .font(.system(size: 10))
+                        .foregroundColor(gold)
+                }
+            }
+
+            Spacer()
+
+            // Centre: edit + dismiss
+            HStack(spacing: 22) {
+                Button {
+                    showEditor = true
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 46, height: 46)
+                            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                        Text("Edit")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+
+                Button {
+                    dismiss()
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 46, height: 46)
+                            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                        Text("Shoot")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+            }
+
+            Spacer()
+
+            // Bottom right: save
+            Button {
+                if let image = displayImage {
+                    UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                    saved = true
+                    Haptics.success()
+                }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: saved ? "checkmark" : "square.and.arrow.down")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.black)
+                        .frame(width: 46, height: 46)
+                        .background(saved ? Color.green : cyan, in: RoundedRectangle(cornerRadius: 11))
+                    Text(saved ? "Saved" : "Save")
+                        .font(.system(size: 10))
+                        .foregroundColor(saved ? .green : cyan)
+                }
+            }
+            .disabled(saved || displayImage == nil)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 12)
+        .padding(.bottom, 22)
     }
 }
