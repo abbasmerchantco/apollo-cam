@@ -8,6 +8,17 @@ struct SettingsView: View {
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
 
+    /// Read straight from the bundle so this never drifts from MARKETING_VERSION
+    /// in project.pbxproj again — no hand-editing on each version bump.
+    private static var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "—"
+        if let build = info?["CFBundleVersion"] as? String, build != short, build != "1" {
+            return "\(short) (\(build))"
+        }
+        return short
+    }
+
     var body: some View {
         NavigationView {
             Form {
@@ -62,7 +73,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    LabeledContent("Version", value: "0.1 (MVP)")
+                    LabeledContent("Version", value: Self.appVersion)
                     LabeledContent("Composition detection", value: "On-device")
                     LabeledContent("Photo critique", value: "Claude API")
                 } header: {

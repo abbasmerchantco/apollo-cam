@@ -121,7 +121,10 @@ struct CameraScreen: View {
                     viewSize: geo.size)
                 if g.aligned && !wasAligned { Haptics.alignedPing() }
                 wasAligned = g.aligned
-                withAnimation(.easeInOut(duration: 0.2)) { guidance = g }
+                // No withAnimation here: this fires ~4x/second and animating the
+                // whole tree meant every control below was mid-flight during a
+                // tap. The tip block animates its own card changes locally.
+                guidance = g
             }
             .onReceive(heartbeat) { _ in partnerHeartbeat() }
         }
@@ -214,6 +217,18 @@ struct CameraScreen: View {
 
     // MARK: - Stacked tip cards
 
+    /// Fixed geometry for the tip block. The card count changes several times a
+    /// second as scene/lighting flip, and when the block grew or shrank it pushed
+    /// the zoom slider, scene pills and shutter row up and down with it — taps
+    /// landed on the wrong control or were dropped mid-animation. Reserving a
+    /// constant height keeps everything below perfectly still.
+    private static let tipCardHeight: CGFloat = 46
+    private static let tipCardSpacing: CGFloat = 7
+    private static let maxTipCards = 3
+    private static var tipAreaHeight: CGFloat {
+        CGFloat(maxTipCards) * tipCardHeight + CGFloat(maxTipCards - 1) * tipCardSpacing
+    }
+
     private var tipStack: some View {
         VStack(spacing: 7) {
             // Alignment status always leads.
@@ -236,30 +251,39 @@ struct CameraScreen: View {
             .padding(.horizontal, 13).padding(.vertical, 9)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
 
-            ForEach(guidance.tips) { tip in
-                HStack(alignment: .top, spacing: 9) {
-                    Image(systemName: tip.icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(cyan)
-                        .frame(width: 18)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tip.title)
-                            .font(.caption2.weight(.bold))
+            // Fixed-height container, cards pinned to the bottom. Fewer than three
+            // tips just leaves empty space at the top — nothing below ever moves.
+            VStack(spacing: Self.tipCardSpacing) {
+                Spacer(minLength: 0)
+                ForEach(Array(guidance.tips.prefix(Self.maxTipCards))) { tip in
+                    HStack(alignment: .center, spacing: 9) {
+                        Image(systemName: tip.icon)
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(cyan)
-                        Text(tip.body)
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.85))
-                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tip.title)
+                                .font(.caption2.weight(.bold))
+                                .foregroundColor(cyan)
+                                .lineLimit(1)
+                            Text(tip.body)
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.85))
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.8)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
+                    .padding(.horizontal, 13)
+                    .frame(height: Self.tipCardHeight)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
-                .padding(.horizontal, 13).padding(.vertical, 9)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
+            .frame(height: Self.tipAreaHeight, alignment: .bottom)
+            .animation(.easeInOut(duration: 0.2), value: guidance.tips)
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
-        .animation(.easeInOut(duration: 0.2), value: guidance.tips)
     }
 
     // MARK: - Zoom slider
@@ -642,26 +666,40 @@ struct CaptureReviewView: View {
         }
     }
 
-    // Horizontal strip so metadata costs almost no vertical space.
+    // Two stacked rows, evenly divided — everything visible at once, no scrolling.
     private var metadataRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 20) {
-                ForEach(metadataItems) { item in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.label)
-                            .font(.system(size: 9))
-                            .foregroundColor(.white.opacity(0.5))
-                        Text(item.value)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.white)
-                    }
-                    .fixedSize()
-                }
-            }
-            .padding(.horizontal, 18)
+        let items = metadataItems
+        let half = Int((Double(items.count) / 2).rounded(.up))
+        let top = Array(items.prefix(half))
+        let bottom = Array(items.dropFirst(half))
+
+        return VStack(spacing: 10) {
+            metadataLine(top)
+            if !bottom.isEmpty { metadataLine(bottom) }
         }
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color.white.opacity(0.05))
+    }
+
+    /// One row of label/value pairs, spread across the full width.
+    private func metadataLine(_ items: [MetaItem]) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(items) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.label)
+                        .font(.system(size: 9))
+                        .foregroundColor(.white.opacity(0.5))
+                        .lineLimit(1)
+                    Text(item.value)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     private var metadataItems: [MetaItem] {

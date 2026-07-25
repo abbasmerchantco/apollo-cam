@@ -434,7 +434,29 @@ struct PhotoEditorView: View {
         }
     }
 
+    /// The suggestion already stored for this photo, if any. Read fresh from the
+    /// store rather than the `entry` copy this view was created with.
+    private var cachedSuggestion: (adjustments: EditAdjustments, note: String)? {
+        guard let fresh = PhotoStore.shared.entries.first(where: { $0.id == entry.id }),
+              let a = fresh.aiAdjustments else { return nil }
+        return (a, fresh.aiAdjustNote ?? "Reapplied the saved AI correction.")
+    }
+
     private func aiAdjust() {
+        // Already analysed this photo — reapply for free. Reset clears the sliders
+        // but never the cache, so Reset → AI adjust costs nothing. The cache is
+        // only discarded when the image itself is edited and saved.
+        if let cached = cachedSuggestion {
+            aiError = nil
+            withAnimation {
+                adj = cached.adjustments
+                aiNote = cached.note
+            }
+            render()
+            Haptics.tap()
+            return
+        }
+
         guard let proxy else { return }
         guard tokenManager.canUseEval else {
             aiError = "Out of AI tokens for today"
@@ -451,6 +473,9 @@ struct PhotoEditorView: View {
                         aiNote = result.note
                     }
                     tokenManager.useEvalToken()
+                    PhotoStore.shared.attachAIAdjustments(result.adjustments,
+                                                          note: result.note,
+                                                          to: entry.id)
                     aiLoading = false
                     render()
                 }

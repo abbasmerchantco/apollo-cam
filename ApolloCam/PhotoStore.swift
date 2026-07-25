@@ -16,6 +16,12 @@ struct PhotoEntry: Codable, Identifiable {
     var shutter: Double? = nil
     var iso: Int? = nil
 
+    // Cached AI-adjust suggestion. Persisted so reopening the editor later reuses
+    // it instead of spending another eval token on the same photo. Cleared
+    // whenever the image itself changes (see PhotoStore.replaceImage).
+    var aiAdjustments: EditAdjustments? = nil
+    var aiAdjustNote: String? = nil
+
     var filename: String { "\(id.uuidString).jpg" }
 }
 
@@ -81,6 +87,15 @@ final class PhotoStore: ObservableObject {
         persist()
     }
 
+    /// Persist the AI's suggested correction so a later editor session can reuse it
+    /// without another API call.
+    func attachAIAdjustments(_ adjustments: EditAdjustments, note: String, to id: UUID) {
+        guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[i].aiAdjustments = adjustments
+        entries[i].aiAdjustNote = note
+        persist()
+    }
+
     func delete(_ entry: PhotoEntry) {
         try? FileManager.default.removeItem(at: dir.appendingPathComponent(entry.filename))
         entries.removeAll { $0.id == entry.id }
@@ -89,11 +104,18 @@ final class PhotoStore: ObservableObject {
     }
 
     /// Overwrite the stored JPEG after an edit, and drop the stale thumbnail.
+    /// The cached AI suggestion is discarded too — it described the OLD pixels, so
+    /// reusing it against an already-corrected image would double-apply the fix.
     func replaceImage(_ image: UIImage, for entry: PhotoEntry) {
         if let data = image.jpegData(compressionQuality: 0.92) {
             try? data.write(to: dir.appendingPathComponent(entry.filename))
         }
         thumbCache.removeObject(forKey: entry.id.uuidString as NSString)
+        if let i = entries.firstIndex(where: { $0.id == entry.id }) {
+            entries[i].aiAdjustments = nil
+            entries[i].aiAdjustNote = nil
+            persist()
+        }
         objectWillChange.send()
     }
 

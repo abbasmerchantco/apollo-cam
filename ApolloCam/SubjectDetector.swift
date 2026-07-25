@@ -101,9 +101,7 @@ final class SubjectDetector: ObservableObject {
             // ---- Identity association ----
             var chosen: Detection?
             if let anchor = self.pendingAnchor {
-                chosen = detections
-                    .filter { Self.dist(CGPoint(x: $0.box.midX, y: $0.box.midY), anchor) < 0.35 || $0.box.insetBy(dx: -0.03, dy: -0.03).contains(anchor) }
-                    .max(by: { $0.confidence < $1.confidence })
+                chosen = Self.pick(at: anchor, from: detections)
                 if chosen != nil { self.pendingAnchor = nil }
             } else if let locked = self.lockedBox {
                 chosen = detections
@@ -232,6 +230,41 @@ final class SubjectDetector: ObservableObject {
                y: a.origin.y + (b.origin.y - a.origin.y) * t,
                width: a.width + (b.width - a.width) * t,
                height: a.height + (b.height - a.height) * t)
+    }
+
+    /// Hit-test for tap-to-select.
+    ///
+    /// The old logic accepted any detection whose centre was within 0.35 (a third of
+    /// the frame!) of the tap and then took the most *confident* one — so a large,
+    /// confidently-detected chair behind a bottle would beat the bottle you tapped.
+    ///
+    /// Correct priority:
+    ///   1. Boxes that actually CONTAIN the tap point → smallest one wins (the bottle
+    ///      sits inside the chair's box, so the tighter box is the thing you meant).
+    ///   2. Nothing contains it → nearest box centre, but only within a tight radius.
+    /// Confidence is only used to break genuine ties.
+    private static func pick(at anchor: CGPoint, from detections: [Detection]) -> Detection? {
+        // 1. Containment — small tolerance so an edge tap still counts.
+        let containing = detections.filter {
+            $0.box.insetBy(dx: -0.02, dy: -0.02).contains(anchor)
+        }
+        if !containing.isEmpty {
+            return containing.min { a, b in
+                let aArea = a.box.width * a.box.height
+                let bArea = b.box.width * b.box.height
+                if abs(aArea - bArea) > 0.004 { return aArea < bArea }
+                return a.confidence > b.confidence
+            }
+        }
+
+        // 2. Fall back to proximity, but only genuinely nearby (was 0.35 → now 0.12).
+        let near = detections
+            .map { ($0, dist(CGPoint(x: $0.box.midX, y: $0.box.midY), anchor)) }
+            .filter { $0.1 < 0.12 }
+        return near.min { a, b in
+            if abs(a.1 - b.1) > 0.01 { return a.1 < b.1 }
+            return a.0.confidence > b.0.confidence
+        }?.0
     }
 
     private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {

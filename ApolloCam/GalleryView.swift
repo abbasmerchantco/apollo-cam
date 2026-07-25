@@ -101,14 +101,20 @@ struct PhotoDetailView: View {
     let image: UIImage
     @Environment(\.dismiss) private var dismiss
     @State private var showCritique = false
+    @State private var showEditor = false
     @State private var confirmDelete = false
+    /// Kept in state so an edit made here updates this screen immediately.
+    @State private var displayImage: UIImage?
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
+    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
+
+    private var shown: UIImage { displayImage ?? image }
 
     var body: some View {
         NavigationView {
             VStack(spacing: 16) {
-                Image(uiImage: image)
+                Image(uiImage: shown)
                     .resizable().scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 14))
                     .padding(.horizontal)
@@ -119,19 +125,35 @@ struct PhotoDetailView: View {
                         .foregroundColor(.secondary)
                 }
 
-                Button {
-                    showCritique = true
-                } label: {
-                    Label(entry.critique == nil
-                          ? (entry.isImported ? "Why does this work?" : "Evaluate")
-                          : "View critique",
-                          systemImage: "sparkles")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
+                HStack(spacing: 10) {
+                    Button {
+                        showCritique = true
+                    } label: {
+                        Label(entry.critique == nil
+                              ? (entry.isImported ? "Why does this work?" : "Evaluate")
+                              : "View critique",
+                              systemImage: "sparkles")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(gold)
+                    .foregroundColor(.black)
+
+                    // Same editor as the capture review screen — this is what makes
+                    // manual sliders and AI adjust available for gallery photos and
+                    // imports, not just the shot you just took.
+                    Button {
+                        showEditor = true
+                    } label: {
+                        Label("Edit", systemImage: "slider.horizontal.3")
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(cyan)
+                    .foregroundColor(.black)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(gold)
-                .foregroundColor(.black)
                 .padding(.horizontal)
 
                 Spacer()
@@ -158,7 +180,13 @@ struct PhotoDetailView: View {
         }
         .preferredColorScheme(.dark)
         .fullScreenCover(isPresented: $showCritique) {
-            CritiqueView(image: image, entryID: entry.id, mode: entry.isImported ? .learnFromPro : .myPhoto)
+            CritiqueView(image: shown, entryID: entry.id, mode: entry.isImported ? .learnFromPro : .myPhoto)
+        }
+        .fullScreenCover(isPresented: $showEditor) {
+            PhotoEditorView(entry: entry) { edited in
+                PhotoStore.shared.replaceImage(edited, for: entry)
+                displayImage = edited
+            }
         }
     }
 }
