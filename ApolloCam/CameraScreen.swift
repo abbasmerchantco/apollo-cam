@@ -19,6 +19,11 @@ struct CameraScreen: View {
     // Capture review
     @State private var reviewEntry: PhotoEntry?
 
+    // Tap-to-select feedback — a brief pulse at the tap point instead of a
+    // persistent tracking box.
+    @State private var tapPulseAt: CGPoint?
+    @State private var tapPulseID = UUID()
+
     // Sheets
     @State private var showGallery = false
     @State private var showSettings = false
@@ -59,8 +64,23 @@ struct CameraScreen: View {
                                 .onEnded { value in
                                     let pt = CGPoint(x: value.location.x / geo.size.width,
                                                      y: value.location.y / geo.size.height)
-                                    detector.select(at: pt)
+                                    // No visible "clear" button anymore, so tapping
+                                    // near the current selection clears it instead
+                                    // of re-selecting the same spot.
+                                    if let current = detector.selectedPoint,
+                                       hypot(current.x - pt.x, current.y - pt.y) < 0.05 {
+                                        detector.clearSelection()
+                                    } else {
+                                        detector.select(at: pt)
+                                    }
                                     Haptics.tap()
+
+                                    let id = UUID()
+                                    tapPulseID = id
+                                    tapPulseAt = value.location
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                        if tapPulseID == id { tapPulseAt = nil }
+                                    }
                                 }
                         )
                         .simultaneousGesture(
@@ -73,21 +93,18 @@ struct CameraScreen: View {
                                 }
                         )
 
-                    CompositionOverlay(rule: guidance.suggestedRule,
-                                       aligned: guidance.aligned,
-                                       focusPoint: guidance.focusPoint)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-
-                    subjectBox(in: geo.size)
+                    if let pt = tapPulseAt {
+                        TapPulse(color: cyan)
+                            .position(pt)
+                            .allowsHitTesting(false)
+                            .id(tapPulseID)
+                    }
 
                     VStack(spacing: 0) {
                         topBar
                         Spacer()
-                        if partnerOn { partnerCard }
-                        tipStack
+                        coachingChip
                         zoomSlider
-                        sceneSelector
                         bottomBar
                     }
                 }
@@ -136,53 +153,24 @@ struct CameraScreen: View {
         }
     }
 
-    // MARK: - Subject box
+    // MARK: - Tap feedback
 
-    @ViewBuilder
-    private func subjectBox(in size: CGSize) -> some View {
-        if let subject = detector.subject {
-            let box = CGRect(
-                x: subject.box.origin.x * size.width,
-                y: subject.box.origin.y * size.height,
-                width: subject.box.width * size.width,
-                height: subject.box.height * size.height)
+    /// A brief ring at the tap point, standing in for the old persistent
+    /// tracking box — subject selection is still tracked and still steers
+    /// the coaching text, it's just not drawn on screen anymore.
+    private struct TapPulse: View {
+        let color: Color
+        @State private var animate = false
 
-            ZStack(alignment: .topTrailing) {
-                // Purely decorative — must not intercept touches. GeometryReader
-                // (used inside CornerBrackets) is hit-testable across its whole
-                // frame, not just the stroked pixels, so without this a large
-                // detected box blocks the settings button and scene pills
-                // sitting beneath it.
-                CornerBrackets(aligned: guidance.aligned)
-                    .allowsHitTesting(false)
-
-                if detector.selectedPoint != nil {
-                    Button {
-                        detector.clearSelection()
-                        Haptics.tap()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundColor(.white)
-                            .background(Circle().fill(.black.opacity(0.5)))
-                    }
-                    .offset(x: 10, y: -10)
+        var body: some View {
+            Circle()
+                .stroke(color, lineWidth: 2)
+                .frame(width: 46, height: 46)
+                .scaleEffect(animate ? 1.4 : 0.6)
+                .opacity(animate ? 0 : 0.9)
+                .onAppear {
+                    withAnimation(.easeOut(duration: 0.5)) { animate = true }
                 }
-
-                if let label = subject.label {
-                    Text(label.capitalized)
-                        .font(.caption2.weight(.bold))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(guidance.aligned ? Color.green : cyan, in: Capsule())
-                        .offset(y: -22)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .allowsHitTesting(false)
-                }
-            }
-            .frame(width: box.width, height: box.height)
-            .position(x: box.midX, y: box.midY)
-            .animation(.easeOut(duration: 0.25), value: subject.box)
         }
     }
 
@@ -191,22 +179,12 @@ struct CameraScreen: View {
     private var topBar: some View {
         HStack {
             Button { showRulePicker = true } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: guidance.suggestedRule.icon)
-                    Text(selectedRule == nil ? (guidance.ruleFromModel ? guidance.suggestedRule.rawValue : "Auto") : guidance.suggestedRule.rawValue)
-                        .font(.footnote.weight(.medium))
-                    if guidance.ruleFromModel && selectedRule == nil {
-                        Text("AI")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(gold, in: Capsule())
-                    }
-                }
-                .padding(.horizontal, 13).padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: Capsule())
+                Image(systemName: guidance.suggestedRule.icon)
+                    .font(.system(size: 15))
+                    .foregroundColor(.white)
+                    .padding(9)
+                    .background(.ultraThinMaterial, in: Circle())
             }
-            .foregroundColor(.white)
 
             Spacer()
 
@@ -222,75 +200,47 @@ struct CameraScreen: View {
         .padding(.top, 8)
     }
 
-    // MARK: - Stacked tip cards
+    // MARK: - Coaching chip
 
-    /// Fixed geometry for the tip block. The card count changes several times a
-    /// second as scene/lighting flip, and when the block grew or shrank it pushed
-    /// the zoom slider, scene pills and shutter row up and down with it — taps
-    /// landed on the wrong control or were dropped mid-animation. Reserving a
-    /// constant height keeps everything below perfectly still.
-    private static let tipCardHeight: CGFloat = 46
-    private static let tipCardSpacing: CGFloat = 7
-    private static let maxTipCards = 3
-    private static var tipAreaHeight: CGFloat {
-        CGFloat(maxTipCards) * tipCardHeight + CGFloat(maxTipCards - 1) * tipCardSpacing
+    /// One calm line of live advice, replacing the old rule-name pill, the
+    /// three-card tip stack, the scene pill strip, and the separate AI
+    /// partner card. When AI Coach is off this shows the instant, on-device
+    /// guidance text; when it's on, a fresh AI tip (or its loading/error
+    /// state) takes over the same line instead of opening a second card.
+    private var coachText: String {
+        if partnerOn {
+            if let tip = partnerTip { return tip.advice }
+            if let err = partnerError { return err }
+            if partnerLoading { return "Coach is looking…" }
+        }
+        return guidance.message
     }
 
-    private var tipStack: some View {
-        VStack(spacing: 7) {
-            // Alignment status always leads.
-            HStack(spacing: 8) {
-                Image(systemName: guidance.aligned ? "checkmark.circle.fill" : "scope")
-                    .foregroundColor(guidance.aligned ? .green : cyan)
-                Text(guidance.message)
-                    .font(.footnote.weight(.medium))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if guidance.scene != .general {
-                    Text(guidance.scene.rawValue)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(guidance.sceneFromUser ? gold : cyan, in: Capsule())
-                }
-            }
-            .padding(.horizontal, 13).padding(.vertical, 9)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-
-            // Fixed-height container, cards pinned to the bottom. Fewer than three
-            // tips just leaves empty space at the top — nothing below ever moves.
-            VStack(spacing: Self.tipCardSpacing) {
-                Spacer(minLength: 0)
-                ForEach(Array(guidance.tips.prefix(Self.maxTipCards))) { tip in
-                    HStack(alignment: .center, spacing: 9) {
-                        Image(systemName: tip.icon)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(cyan)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(tip.title)
-                                .font(.caption2.weight(.bold))
-                                .foregroundColor(cyan)
-                                .lineLimit(1)
-                            Text(tip.body)
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.85))
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.8)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 13)
-                    .frame(height: Self.tipCardHeight)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                }
-            }
-            .frame(height: Self.tipAreaHeight, alignment: .bottom)
-            .animation(.easeInOut(duration: 0.2), value: guidance.tips)
+    private var coachIcon: String {
+        if partnerOn {
+            if let tip = partnerTip { return sanitizedIcon(tip.icon) }
+            if partnerError != nil { return "exclamationmark.triangle" }
+            if partnerLoading { return "sparkles" }
         }
-        .padding(.horizontal)
+        return guidance.aligned ? "checkmark.circle.fill" : "scope"
+    }
+
+    private var coachingChip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: coachIcon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(!partnerOn && guidance.aligned ? .green : cyan)
+            Text(coachText)
+                .font(.footnote.weight(.medium))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 30)
         .padding(.bottom, 8)
+        .animation(.easeInOut(duration: 0.25), value: coachText)
     }
 
     // MARK: - Zoom slider
@@ -320,108 +270,6 @@ struct CameraScreen: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal)
         .padding(.bottom, 8)
-    }
-
-    // MARK: - Scene selector
-
-    private var sceneSelector: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
-                scenePill(title: "AUTO", active: sceneOverride == nil) {
-                    sceneOverride = nil
-                }
-                ForEach(SceneKind.selectable) { kind in
-                    scenePill(title: kind.pill, active: sceneOverride == kind) {
-                        sceneOverride = (sceneOverride == kind) ? nil : kind
-                    }
-                }
-            }
-            .padding(.horizontal)
-        }
-        .padding(.bottom, 10)
-    }
-
-    private func scenePill(title: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-            Haptics.tap()
-        } label: {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(active ? .black : .white.opacity(0.7))
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(active ? cyan : Color.white.opacity(0.12), in: Capsule())
-                .overlay(Capsule().stroke(active ? .clear : .white.opacity(0.2), lineWidth: 1))
-        }
-    }
-
-    // MARK: - AI Partner
-
-    private var partnerCard: some View {
-        Group {
-            if partnerLoading && partnerTip == nil {
-                HStack(spacing: 10) {
-                    ProgressView().tint(gold)
-                    Text("Coach is looking…")
-                        .font(.footnote)
-                        .foregroundColor(.white.opacity(0.8))
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal)
-                .padding(.bottom, 6)
-            } else if let tip = partnerTip {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: sanitizedIcon(tip.icon))
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(gold)
-                        .frame(width: 26)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(tip.title.uppercased())
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(gold)
-                        Text(tip.advice)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundColor(.white)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let scene = tip.scene, !scene.isEmpty {
-                            Text("Sees: \(scene)")
-                                .font(.caption2)
-                                .foregroundColor(.white.opacity(0.55))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    if partnerLoading { ProgressView().tint(gold.opacity(0.6)).scaleEffect(0.8) }
-                }
-                .padding(14)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal)
-                .padding(.bottom, 6)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .id(tip.id)
-            } else if let err = partnerError {
-                Text(err)
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .padding(10)
-                    .frame(maxWidth: .infinity)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-            } else {
-                Text("Hold the framing steady and your coach will chime in")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.7))
-                    .padding(10)
-                    .frame(maxWidth: .infinity)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-            }
-        }
-        .animation(.spring(duration: 0.35), value: partnerTip)
     }
 
     private func sanitizedIcon(_ name: String) -> String {
@@ -560,6 +408,11 @@ struct CameraScreen: View {
 
     // MARK: - Rule picker
 
+    /// A short, recognizable set rather than the full list of composition
+    /// rules — kept deliberately small so this reads like a native control,
+    /// not a photography-jargon menu.
+    private static let curatedRules: [CompositionRule] = [.ruleOfThirds, .centeredCircle, .symmetry, .leadingLines]
+
     private var rulePicker: some View {
         NavigationView {
             List {
@@ -569,7 +422,7 @@ struct CameraScreen: View {
                     Label("Auto (recommended)", systemImage: "wand.and.stars")
                         .foregroundColor(selectedRule == nil ? gold : .primary)
                 }
-                ForEach(CompositionRule.allCases) { rule in
+                ForEach(Self.curatedRules) { rule in
                     Button {
                         selectedRule = rule; showRulePicker = false
                     } label: {
@@ -586,31 +439,6 @@ struct CameraScreen: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
-    }
-}
-
-// MARK: - Viewfinder-style corner brackets
-
-struct CornerBrackets: View {
-    let aligned: Bool
-    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            let len = min(w, h) * 0.26
-            Path { p in
-                // top-left
-                p.move(to: CGPoint(x: 0, y: len)); p.addLine(to: CGPoint(x: 0, y: 0)); p.addLine(to: CGPoint(x: len, y: 0))
-                // top-right
-                p.move(to: CGPoint(x: w - len, y: 0)); p.addLine(to: CGPoint(x: w, y: 0)); p.addLine(to: CGPoint(x: w, y: len))
-                // bottom-right
-                p.move(to: CGPoint(x: w, y: h - len)); p.addLine(to: CGPoint(x: w, y: h)); p.addLine(to: CGPoint(x: w - len, y: h))
-                // bottom-left
-                p.move(to: CGPoint(x: len, y: h)); p.addLine(to: CGPoint(x: 0, y: h)); p.addLine(to: CGPoint(x: 0, y: h - len))
-            }
-            .stroke(aligned ? Color.green : cyan, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-        }
     }
 }
 
