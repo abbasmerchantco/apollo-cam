@@ -148,7 +148,13 @@ struct CameraScreen: View {
                 height: subject.box.height * size.height)
 
             ZStack(alignment: .topTrailing) {
+                // Purely decorative — must not intercept touches. GeometryReader
+                // (used inside CornerBrackets) is hit-testable across its whole
+                // frame, not just the stroked pixels, so without this a large
+                // detected box blocks the settings button and scene pills
+                // sitting beneath it.
                 CornerBrackets(aligned: guidance.aligned)
+                    .allowsHitTesting(false)
 
                 if detector.selectedPoint != nil {
                     Button {
@@ -171,6 +177,7 @@ struct CameraScreen: View {
                         .background(guidance.aligned ? Color.green : cyan, in: Capsule())
                         .offset(y: -22)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(width: box.width, height: box.height)

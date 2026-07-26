@@ -23,6 +23,10 @@ struct EditAdjustments: Codable, Equatable {
     var rotationQuarters: Int = 0 // number of 90° clockwise turns
     var flipH: Bool = false
 
+    // Crop — normalized (0...1), top-left origin, relative to the image
+    // *after* orientation has been applied. (0,0,1,1) means "no crop".
+    var cropRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+
     var isNeutral: Bool { self == EditAdjustments() }
 }
 
@@ -70,6 +74,25 @@ enum ImagePipeline {
             // Re-origin so extent starts at zero after rotating.
             ci = ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x,
                                                       y: -ci.extent.origin.y))
+        }
+
+        // 1.5. Crop — normalized rect relative to the now-oriented image. Core
+        // Image's coordinate origin is bottom-left, so the y-axis is flipped
+        // relative to the UI's top-left-origin crop rect.
+        if adj.cropRect != CGRect(x: 0, y: 0, width: 1, height: 1) {
+            let ext = ci.extent
+            let r = adj.cropRect
+            let pixelCrop = CGRect(
+                x: ext.origin.x + r.minX * ext.width,
+                y: ext.origin.y + (1 - r.maxY) * ext.height,
+                width: r.width * ext.width,
+                height: r.height * ext.height
+            ).intersection(ext)
+            if !pixelCrop.isEmpty {
+                ci = ci.cropped(to: pixelCrop)
+                ci = ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x,
+                                                          y: -ci.extent.origin.y))
+            }
         }
 
         // 2. Exposure (EV).
@@ -148,6 +171,129 @@ enum ImagePipeline {
     }
 }
 
+// MARK: - Crop overlay
+
+/// Draggable crop rectangle shown over the un-cropped, orientation-corrected
+/// preview. `rect` is normalized (0...1) with a top-left origin, matching
+/// `EditAdjustments.cropRect`.
+private struct CropOverlay: View {
+    @Binding var rect: CGRect
+    let imageSize: CGSize
+
+    private enum Corner: CaseIterable { case topLeft, topRight, bottomLeft, bottomRight }
+    private let minSize: CGFloat = 0.08
+    private let handleTouchSize: CGFloat = 30
+
+    @State private var moveStart: CGRect?
+
+    var body: some View {
+        GeometryReader { geo in
+            let content = Self.contentRect(imageSize: imageSize, container: geo.size)
+            let frame = pixelRect(rect, in: content)
+
+            ZStack {
+                Path { p in
+                    p.addRect(CGRect(origin: .zero, size: geo.size))
+                    p.addRect(frame)
+                }
+                .fill(Color.black.opacity(0.55), style: FillStyle(eoFill: true))
+
+                Rectangle()
+                    .stroke(Color.white, lineWidth: 1.5)
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+                    .contentShape(Rectangle())
+                    .gesture(moveGesture(content: content))
+
+                ForEach(Corner.allCases, id: \.self) { corner in
+                    handle(corner, frame: frame, content: content)
+                }
+            }
+        }
+    }
+
+    private func handle(_ corner: Corner, frame: CGRect, content: CGRect) -> some View {
+        let point: CGPoint = {
+            switch corner {
+            case .topLeft: return CGPoint(x: frame.minX, y: frame.minY)
+            case .topRight: return CGPoint(x: frame.maxX, y: frame.minY)
+            case .bottomLeft: return CGPoint(x: frame.minX, y: frame.maxY)
+            case .bottomRight: return CGPoint(x: frame.maxX, y: frame.maxY)
+            }
+        }()
+        return Circle()
+            .fill(Color.white)
+            .overlay(Circle().stroke(Color.black.opacity(0.4), lineWidth: 1))
+            .frame(width: 14, height: 14)
+            .frame(width: handleTouchSize, height: handleTouchSize) // larger hit target than visible dot
+            .contentShape(Circle())
+            .position(point)
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        updateCorner(corner, to: value.location, content: content)
+                    }
+            )
+    }
+
+    private func moveGesture(content: CGRect) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let start = moveStart ?? rect
+                if moveStart == nil { moveStart = rect }
+                guard content.width > 0, content.height > 0 else { return }
+                let dx = value.translation.width / content.width
+                let dy = value.translation.height / content.height
+                var r = start
+                r.origin.x = min(max(start.origin.x + dx, 0), 1 - start.width)
+                r.origin.y = min(max(start.origin.y + dy, 0), 1 - start.height)
+                rect = r
+            }
+            .onEnded { _ in moveStart = nil }
+    }
+
+    private func updateCorner(_ corner: Corner, to location: CGPoint, content: CGRect) {
+        guard content.width > 0, content.height > 0 else { return }
+        let nx = min(max((location.x - content.minX) / content.width, 0), 1)
+        let ny = min(max((location.y - content.minY) / content.height, 0), 1)
+
+        var minX = rect.minX, minY = rect.minY, maxX = rect.maxX, maxY = rect.maxY
+        switch corner {
+        case .topLeft:
+            minX = min(nx, maxX - minSize)
+            minY = min(ny, maxY - minSize)
+        case .topRight:
+            maxX = max(nx, minX + minSize)
+            minY = min(ny, maxY - minSize)
+        case .bottomLeft:
+            minX = min(nx, maxX - minSize)
+            maxY = max(ny, minY + minSize)
+        case .bottomRight:
+            maxX = max(nx, minX + minSize)
+            maxY = max(ny, minY + minSize)
+        }
+        rect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func pixelRect(_ r: CGRect, in content: CGRect) -> CGRect {
+        CGRect(x: content.minX + r.minX * content.width,
+               y: content.minY + r.minY * content.height,
+               width: r.width * content.width,
+               height: r.height * content.height)
+    }
+
+    /// The rect `.scaledToFit()` actually paints the image into, given letterboxing.
+    private static func contentRect(imageSize: CGSize, container: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else {
+            return CGRect(origin: .zero, size: container)
+        }
+        let scale = min(container.width / imageSize.width, container.height / imageSize.height)
+        let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let origin = CGPoint(x: (container.width - size.width) / 2, y: (container.height - size.height) / 2)
+        return CGRect(origin: origin, size: size)
+    }
+}
+
 // MARK: - Editor screen
 
 struct PhotoEditorView: View {
@@ -165,6 +311,11 @@ struct PhotoEditorView: View {
     @State private var rendered: UIImage?
     @State private var showingOriginal = false
 
+    // Crop
+    @State private var cropMode = false
+    @State private var cropDraft = CGRect(x: 0, y: 0, width: 1, height: 1)
+    @State private var cropBase: UIImage?
+
     // AI adjust
     @State private var aiLoading = false
     @State private var aiNote: String?
@@ -177,11 +328,13 @@ struct PhotoEditorView: View {
         NavigationView {
             VStack(spacing: 0) {
                 imageArea
-                if let note = aiNote { aiNoteBar(note) }
-                if let err = aiError { errorBar(err) }
-                sliderRow
-                toolStrip
-                actionRow
+                if cropMode {
+                    cropControlRow
+                } else {
+                    sliderRow
+                    toolStrip
+                    actionRow
+                }
             }
             .background(Color.black.ignoresSafeArea())
             .navigationTitle("Edit")
@@ -194,7 +347,7 @@ struct PhotoEditorView: View {
                     Button("Save") { save() }
                         .foregroundColor(cyan)
                         .fontWeight(.semibold)
-                        .disabled(original == nil)
+                        .disabled(original == nil || cropMode)
                 }
             }
         }
@@ -207,7 +360,15 @@ struct PhotoEditorView: View {
     private var imageArea: some View {
         ZStack {
             Color.black
-            if let shown = showingOriginal ? proxy : (rendered ?? proxy) {
+
+            if cropMode, let base = cropBase {
+                CropOverlay(rect: $cropDraft, imageSize: base.size)
+                    .background(
+                        Image(uiImage: base)
+                            .resizable()
+                            .scaledToFit()
+                    )
+            } else if let shown = showingOriginal ? proxy : (rendered ?? proxy) {
                 Image(uiImage: shown)
                     .resizable()
                     .scaledToFit()
@@ -215,7 +376,7 @@ struct PhotoEditorView: View {
                 ProgressView().tint(.white)
             }
 
-            if showingOriginal {
+            if showingOriginal && !cropMode {
                 VStack {
                     Text("ORIGINAL")
                         .font(.caption2.weight(.bold))
@@ -226,14 +387,83 @@ struct PhotoEditorView: View {
                     Spacer()
                 }
             }
+
+            // Note/error live as an overlay pinned to the bottom of the image
+            // instead of extra rows in the outer VStack. Previously they were
+            // separate rows, so the image area shrank whenever a note appeared
+            // after an edit — the photo displayed at a different size before
+            // and after editing. Overlaying keeps imageArea's frame constant.
+            if !cropMode {
+                VStack(spacing: 8) {
+                    Spacer()
+                    if let note = aiNote { aiNoteBar(note) }
+                    if let err = aiError { errorBar(err) }
+                }
+                .padding(.bottom, 10)
+                .allowsHitTesting(false)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         // Press and hold anywhere on the photo to compare against the original.
-        .onLongPressGesture(minimumDuration: 0.08, maximumDistance: 50) {
-        } onPressingChanged: { pressing in
-            showingOriginal = pressing
+        // This uses a raw touch-down/touch-up drag gesture rather than
+        // onLongPressGesture: once onLongPressGesture's minimumDuration elapses
+        // it considers itself "done" and resets `pressing` back to false
+        // immediately — before the finger actually lifts — which made the
+        // comparison flash for an instant and revert while still held.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !cropMode else { return }
+                    if !showingOriginal { showingOriginal = true }
+                }
+                .onEnded { _ in
+                    showingOriginal = false
+                }
+        )
+    }
+
+    private var cropControlRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                cropMode = false
+                cropBase = nil
+            } label: {
+                Text("Cancel")
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            }
+
+            Button {
+                cropDraft = CGRect(x: 0, y: 0, width: 1, height: 1)
+            } label: {
+                Text("Reset")
+                    .font(.subheadline)
+                    .frame(width: 80)
+                    .frame(height: 40)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            }
+
+            Button {
+                adj.cropRect = cropDraft
+                cropMode = false
+                cropBase = nil
+                render()
+            } label: {
+                Text("Apply")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .foregroundColor(.black)
+                    .background(cyan, in: RoundedRectangle(cornerRadius: 9))
+            }
         }
+        .foregroundColor(.white)
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+        .padding(.bottom, 18)
     }
 
     // MARK: Slider
@@ -336,6 +566,15 @@ struct PhotoEditorView: View {
             }
 
             Button {
+                enterCropMode()
+            } label: {
+                Image(systemName: "crop")
+                    .frame(width: 44, height: 40)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+            }
+            .disabled(proxy == nil)
+
+            Button {
                 aiAdjust()
             } label: {
                 HStack(spacing: 6) {
@@ -381,16 +620,20 @@ struct PhotoEditorView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .padding(.horizontal, 18)
-        .padding(.top, 10)
     }
 
     private func errorBar(_ msg: String) -> some View {
         Text(msg)
             .font(.caption)
             .foregroundColor(.orange)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 18)
-            .padding(.top, 10)
     }
 
     // MARK: Work
@@ -406,6 +649,18 @@ struct PhotoEditorView: View {
                 rendered = small
             }
         }
+    }
+
+    /// Seeds the crop overlay with an orientation-corrected but *un-cropped*
+    /// view of the proxy, so the user can always see (and re-adjust) the full
+    /// frame — including expanding a crop back out — regardless of the
+    /// currently applied crop.
+    private func enterCropMode() {
+        guard let proxy else { return }
+        let orientationOnly = EditAdjustments(rotationQuarters: adj.rotationQuarters, flipH: adj.flipH)
+        cropBase = ImagePipeline.apply(orientationOnly, to: proxy)
+        cropDraft = adj.cropRect
+        cropMode = true
     }
 
     /// Re-renders the small proxy only — full resolution is rendered once on save.
@@ -448,8 +703,10 @@ struct PhotoEditorView: View {
         // only discarded when the image itself is edited and saved.
         if let cached = cachedSuggestion {
             aiError = nil
+            let keepCrop = adj.cropRect
             withAnimation {
                 adj = cached.adjustments
+                adj.cropRect = keepCrop
                 aiNote = cached.note
             }
             render()
@@ -468,8 +725,10 @@ struct PhotoEditorView: View {
             do {
                 let result = try await AdjustService.suggestAdjustments(for: proxy)
                 await MainActor.run {
+                    let keepCrop = adj.cropRect
                     withAnimation {
                         adj = result.adjustments
+                        adj.cropRect = keepCrop
                         aiNote = result.note
                     }
                     tokenManager.useEvalToken()
