@@ -1,10 +1,36 @@
 # ApolloCam — Known Issues
 
-State as of v0.85.
+State as of v0.88.
 
 ## Open
 
-Nothing currently open. The rotate/save bug that headed this section since v0.6 is fixed in v0.85 — see below.
+### Untested on device
+
+None of the v0.88 camera work has been run on real hardware yet. The zoom rework in particular is the kind of change that can only be judged on a physical phone:
+
+- The display/device zoom mapping is derived from `virtualDeviceSwitchOverVideoZoomFactors`, which the simulator does not provide. On the simulator the app falls back to the single wide-angle path (stops `1/2/3`, no 0.5×) — that fallback is *expected* there and is not evidence of a bug.
+- The derived stops should be checked against the stock camera app on each device to hand: a dual-wide phone should offer `0.5/1/2`, a triple-camera Pro `0.5/1/2/5`.
+- `ramp(toVideoZoomFactor:withRate:)` is used for button taps and the Coach pull-back. The published `zoomFactor` is set to the target immediately rather than tracking the ramp, so the label leads the lens by a few hundred milliseconds by design. If that reads as laggy or jumpy in practice, the rate (currently 6) is the thing to tune.
+
+### AI-suggested zoom is unvalidated
+
+Claude now returns a zoom alongside its coaching tip. The prompt biases it toward real lens stops and toward tighter framing, on the theory that beginners shoot too wide. Whether it's right often enough to be worth a button is an open question that only real shooting answers. The chip is suppressed when the suggestion is within 12% of the current zoom, so a badly-calibrated model shows up as a chip that never appears rather than one that fights the user.
+
+## Fixed in v0.88
+
+### Composition guide drew no overlay
+
+Selecting a guide from the camera's composition sheet changed the coaching text and the top-bar icon but rendered nothing on the preview.
+
+**Root cause:** not a rendering bug — a leftover. v0.82 retired `CompositionOverlay` from the camera screen deliberately (the drawn geometry was the main source of visual clutter) but kept the picker sheet, still titled "Composition guide". From then on the control had no drawn output to change; `CompositionOverlay` remained in `CompositionRules.swift`, fully implemented and never instantiated.
+
+**Fix:** `CompositionOverlay` gained a `Style` — `.reference` (hairline white, no target rings) for the always-on grid, `.guide` (the original cyan/green with rings) for a rule the user chose. `CameraScreen` renders it again, gated on a `showCompositionGrid` setting. Auto mode is pinned to a static thirds grid rather than following `guidance.suggestedRule`, which re-evaluates ~4×/second and would otherwise swap the overlay's entire geometry mid-frame — the same instability that motivated removing overlays in the first place.
+
+### 0.5× was unreachable
+
+`CameraController` only ever opened `.builtInWideAngleCamera`, whose `minAvailableVideoZoomFactor` is 1.0. No amount of UI work could expose an ultra-wide, because the ultra-wide was never part of the capture session. Fixed by preferring the widest available *virtual* device (triple → dual-wide → dual → wide) and mapping between device zoom and the display zoom the user reads.
+
+## Fixed in v0.85
 
 ## Fixed in v0.85
 

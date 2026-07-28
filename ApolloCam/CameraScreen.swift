@@ -28,8 +28,14 @@ struct CameraScreen: View {
     @State private var showGallery = false
     @State private var showSettings = false
 
+    // Overlay
+    @AppStorage("showCompositionGrid") private var showGrid = true
+
     // Zoom
     @State private var pinchStartZoom: CGFloat = 1.0
+    @State private var zoomExpanded = false
+    /// Where the user was framed before Coach pulled back to the wide view.
+    @State private var zoomBeforeCoach: CGFloat?
 
     // AI Partner
     @State private var partnerOn = false
@@ -93,6 +99,19 @@ struct CameraScreen: View {
                                 }
                         )
 
+                    if showGrid {
+                        // In reference mode every input is held constant, so SwiftUI
+                        // diffs the overlay as unchanged and never redraws it. Feeding
+                        // it `guidance` would re-run the Path ~4×/second for a grid
+                        // whose geometry cannot change — wasted work on the one screen
+                        // where the frame budget actually matters.
+                        CompositionOverlay(rule: overlayRule,
+                                           aligned: overlayStyle == .guide && guidance.aligned,
+                                           style: overlayStyle,
+                                           focusPoint: overlayStyle == .guide ? guidance.focusPoint : nil)
+                            .ignoresSafeArea()
+                    }
+
                     if let pt = tapPulseAt {
                         TapPulse(color: cyan)
                             .position(pt)
@@ -104,7 +123,7 @@ struct CameraScreen: View {
                         topBar
                         Spacer()
                         coachingChip
-                        zoomSlider
+                        zoomControl
                         bottomBar
                     }
                 }
@@ -174,6 +193,24 @@ struct CameraScreen: View {
         }
     }
 
+    // MARK: - Composition overlay
+
+    /// Which geometry is drawn over the preview.
+    ///
+    /// Auto mode is deliberately pinned to a plain thirds grid rather than following
+    /// `guidance.suggestedRule`. That value re-evaluates roughly four times a second,
+    /// so tracking it would swap the whole overlay — circles to diagonals to
+    /// triangles — under the user's eye while they were still framing the shot.
+    /// A grid that stays put is the useful thing; the rule that's actually being
+    /// coached is already communicated in words by the coaching line.
+    private var overlayRule: CompositionRule { selectedRule ?? .ruleOfThirds }
+
+    /// A rule the user picked on purpose earns the loud treatment; the always-on
+    /// default stays as quiet as viewfinder furniture.
+    private var overlayStyle: CompositionOverlay.Style {
+        selectedRule == nil ? .reference : .guide
+    }
+
     // MARK: - Bars
 
     private var topBar: some View {
@@ -227,50 +264,148 @@ struct CameraScreen: View {
 
     private var coachingChip: some View {
         HStack(spacing: 8) {
-            Image(systemName: coachIcon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(!partnerOn && guidance.aligned ? .green : cyan)
-            Text(coachText)
-                .font(.footnote.weight(.medium))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            HStack(spacing: 8) {
+                Image(systemName: coachIcon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(!partnerOn && guidance.aligned ? .green : cyan)
+                Text(coachText)
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+
+            zoomSuggestionChip
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.horizontal, 30)
+        .padding(.horizontal, 20)
         .padding(.bottom, 8)
         .animation(.easeInOut(duration: 0.25), value: coachText)
+        .animation(.spring(duration: 0.3), value: suggestedZoom)
     }
 
-    // MARK: - Zoom slider
+    /// The zoom Claude thinks this shot wants, if it's meaningfully different from
+    /// where the user is now. Coach shoots from the widest lens so it can see the
+    /// whole scene, which means "how far in should I actually be?" is a question it
+    /// is uniquely placed to answer — and one beginners rarely think to ask.
+    private var suggestedZoom: CGFloat? {
+        guard partnerOn, let raw = partnerTip?.suggestedZoom else { return nil }
+        let target = min(max(CGFloat(raw), camera.minZoom), camera.maxZoom)
+        // Ignore nudges too small to be worth a tap.
+        guard abs(target - camera.zoomFactor) > max(0.12, camera.zoomFactor * 0.12) else { return nil }
+        return target
+    }
 
-    private var zoomSlider: some View {
+    private var zoomSuggestionChip: some View {
+        Group {
+            if let target = suggestedZoom {
+                Button {
+                    camera.setZoom(target, animated: true)
+                    pinchStartZoom = target
+                    Haptics.tap()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: target > camera.zoomFactor ? "plus.magnifyingglass" : "minus.magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("\(zoomLabel(target))×")
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                    }
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 11).padding(.vertical, 9)
+                    .background(gold, in: Capsule())
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+    }
+
+    // MARK: - Zoom control
+
+    /// Stock-camera-style stops, with a fine slider that unfolds on demand.
+    ///
+    /// The old always-visible slider had two problems for the target user: it started
+    /// at 1× (so the ultra-wide was unreachable), and it asked someone to dial in a
+    /// continuous value when what they actually wanted was "the wide one" or "the
+    /// zoomed one". Discrete stops are the common case; the slider is still there for
+    /// the rarer in-between framing, one tap away.
+    private var zoomControl: some View {
+        VStack(spacing: 8) {
+            if zoomExpanded { zoomFineSlider }
+            zoomStopBar
+        }
+        .padding(.bottom, 10)
+    }
+
+    /// Index of the stop the current zoom belongs to — the highest stop at or below
+    /// the live value, so 1.7× keeps the "1" chip lit (showing "1.7×") rather than
+    /// leaving nothing selected.
+    private var activeStopIndex: Int {
+        var index = 0
+        for (i, stop) in camera.zoomStops.enumerated() where stop <= camera.zoomFactor + 0.02 {
+            index = i
+        }
+        return index
+    }
+
+    private var zoomStopBar: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(camera.zoomStops.enumerated()), id: \.offset) { index, stop in
+                let active = index == activeStopIndex
+                Button {
+                    if active {
+                        withAnimation(.spring(duration: 0.28)) { zoomExpanded.toggle() }
+                    } else {
+                        camera.setZoom(stop, animated: true)
+                        pinchStartZoom = stop
+                        withAnimation(.spring(duration: 0.28)) { zoomExpanded = false }
+                    }
+                    Haptics.tap()
+                } label: {
+                    Text(active ? "\(liveZoomLabel)×" : zoomLabel(stop))
+                        .font(.system(size: active ? 13 : 12, weight: .semibold).monospacedDigit())
+                        .foregroundColor(active ? .black : .white)
+                        .padding(.horizontal, active ? 12 : 9)
+                        .frame(minWidth: 36, minHeight: 34)
+                        .background(active ? gold : Color.white.opacity(0.16), in: Capsule())
+                }
+            }
+        }
+        .padding(5)
+        .background(.ultraThinMaterial, in: Capsule())
+        .animation(.spring(duration: 0.25), value: activeStopIndex)
+    }
+
+    private var zoomFineSlider: some View {
         HStack(spacing: 10) {
-            Text("1×")
-                .font(.caption2)
-                .foregroundColor(cyan.opacity(0.9))
+            Text("\(zoomLabel(camera.minZoom))×")
+                .font(.caption2).foregroundColor(cyan.opacity(0.9))
             Slider(
                 value: Binding(
                     get: { Double(camera.zoomFactor) },
                     set: { camera.setZoom(CGFloat($0)); pinchStartZoom = CGFloat($0) }
                 ),
-                in: 1...Double(camera.maxZoom)
+                in: Double(camera.minZoom)...Double(camera.maxZoom)
             )
             .tint(cyan)
-            Text(String(format: "%.0f×", camera.maxZoom))
-                .font(.caption2)
-                .foregroundColor(cyan.opacity(0.9))
-            Text(String(format: "%.1f×", camera.zoomFactor))
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundColor(cyan)
-                .frame(width: 38, alignment: .trailing)
+            Text("\(zoomLabel(camera.maxZoom))×")
+                .font(.caption2).foregroundColor(cyan.opacity(0.9))
         }
-        .padding(.horizontal, 13).padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 20)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
+
+    /// "0.5", "1", "2.5" — trailing ".0" dropped, since "2×" reads better than "2.0×".
+    private func zoomLabel(_ value: CGFloat) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded == rounded.rounded()
+            ? String(format: "%.0f", rounded)
+            : String(format: "%.1f", rounded)
+    }
+
+    private var liveZoomLabel: String { zoomLabel(camera.zoomFactor) }
 
     private func sanitizedIcon(_ name: String) -> String {
         UIImage(systemName: name) != nil ? name : "lightbulb.fill"
@@ -301,6 +436,8 @@ struct CameraScreen: View {
         let rule = guidance.suggestedRule
         let subject = detector.subject
         let userSelected = detector.selectedPoint != nil
+        let currentZoom = Double(camera.zoomFactor)
+        let zoomRange = Double(camera.minZoom)...Double(camera.maxZoom)
 
         Task {
             do {
@@ -308,7 +445,9 @@ struct CameraScreen: View {
                     snapshot: snapshot,
                     rule: rule,
                     subject: subject,
-                    userSelectedSubject: userSelected)
+                    userSelectedSubject: userSelected,
+                    currentZoom: currentZoom,
+                    zoomRange: zoomRange)
                 await MainActor.run {
                     withAnimation { partnerTip = tip }
                     tokenManager.useAdviceToken()
@@ -354,10 +493,29 @@ struct CameraScreen: View {
             Button {
                 withAnimation(.spring(duration: 0.3)) {
                     partnerOn.toggle()
-                    if !partnerOn {
+                    if partnerOn {
+                        // Pull back to the widest lens the phone has. Claude can only
+                        // advise on what the frame contains, so asking it for help from
+                        // inside a 3× crop hides exactly the information it needs —
+                        // it can't suggest "there's a better angle to your left" or
+                        // "step back and include the doorway" if neither is in shot.
+                        // It hands a zoom back with its advice, so the user gets
+                        // returned to a tighter framing deliberately rather than by
+                        // guesswork.
+                        zoomBeforeCoach = camera.zoomFactor
+                        camera.setZoom(camera.minZoom, animated: true)
+                        pinchStartZoom = camera.minZoom
+                        zoomExpanded = false
+                    } else {
                         partnerTip = nil
                         partnerError = nil
                         stillSince = nil
+                        // Put the user back where they were framed before we intervened.
+                        if let restore = zoomBeforeCoach {
+                            camera.setZoom(restore, animated: true)
+                            pinchStartZoom = restore
+                        }
+                        zoomBeforeCoach = nil
                     }
                 }
                 Haptics.tap()

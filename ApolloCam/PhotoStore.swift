@@ -108,9 +108,19 @@ final class PhotoStore: ObservableObject {
     }
 
     func delete(_ entry: PhotoEntry) {
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(entry.filename))
-        entries.removeAll { $0.id == entry.id }
-        thumbCache.removeObject(forKey: entry.id.uuidString as NSString)
+        delete(ids: [entry.id])
+    }
+
+    /// Bulk delete for gallery multi-select. Deliberately one pass and one `persist()`
+    /// rather than a loop over the single-entry version, which would rewrite the index
+    /// file once per photo and republish `entries` on every removal.
+    func delete(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for entry in entries where ids.contains(entry.id) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(entry.filename))
+            thumbCache.removeObject(forKey: entry.id.uuidString as NSString)
+        }
+        entries.removeAll { ids.contains($0.id) }
         persist()
     }
 

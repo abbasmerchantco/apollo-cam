@@ -44,18 +44,21 @@ Pick whichever matches your setup:
 2. In the app: **Settings tab → paste key → Save key.** Stored in the iOS Keychain, only ever sent to api.anthropic.com.
 3. Default model is Haiku (fraction of a cent per critique). Switch to Sonnet in Settings for deeper feedback.
 
-## What works in this MVP
-- **Live composition guide** — auto-picks a rule from the scene (or choose manually): rule of thirds, golden ratio, centered circle, diagonal, symmetry, leading lines, frame-within-frame, foreground interest, layering.
-- **Subject detection** — on-device (faces > animals > salient objects), tracked bounding box, directional guidance ("Move subject right and up"), haptic + green lines when aligned.
+## What works (as of v0.88)
+- **Camera coach** — a single line of live advice over the preview. On-device guidance by default; turn on Coach and Claude looks at the frame and gives one concrete instruction plus a suggested zoom.
+- **Composition guide** — a rule-of-thirds grid over the live preview by default (toggle in Settings → Camera). Pick a specific guide — Auto, rule of thirds, centered, symmetry, leading lines — to draw that guide's shape instead, which turns green when your subject lands on target.
+- **Subject detection** — on-device (faces > animals > salient objects), directional guidance ("Move subject right and up"), haptic when aligned. Tap to pick your subject; tap it again to clear.
 - **Lighting hints** — too dark / blown-out warnings.
-- **Zoom presets** — 1× / 2× / 5×.
-- **Evaluate** — 5-dimension Claude critique (Composition, Lighting, Color, Focus, Aesthetics) with scores, feedback, and one actionable tip each.
+- **Zoom** — 0.5×/1×/2×/3×-style stop buttons taken from the lenses your phone actually has, expanding to a fine slider on demand. Pinch works too.
+- **Evaluate** — 5-dimension Claude critique (Composition, Lighting, Color, Focus, Aesthetics) with scores, feedback, and one actionable tip each. Available on single photos or a gallery selection.
+- **Editor** — manual tone/colour sliders, rotate, flip, crop (with a thirds grid and centre cross), and AI Adjust, which suggests values and a crop on the same controls.
 - **Learn from pros** — import any photo you admire → "Why does this work?" teacher-mode breakdown.
-- **Gallery** — all photos + critiques stored locally on-device.
+- **Gallery** — all photos + critiques stored locally on-device, with multi-select for bulk save / share / evaluate / delete.
 
-## Honest limitations (MVP)
+## Honest limitations
 - "Auto" composition selection is heuristic (subject size/position), not a trained scene classifier.
 - Leading lines / frame-within-frame overlays are static guides — the app doesn't yet detect actual lines in your scene.
+- The v0.88 zoom work has not been run on a physical phone yet, and the simulator can't exercise it (no multi-lens device, so it falls back to 1×–3×). See `Known Issues.md`.
 - No accounts/sync — all local (fine while the user is just you).
 - Iteration loop is: edit code → push → wait ~5 min for CI → reinstall ipa. Slower than Xcode, but free and Mac-less.
 

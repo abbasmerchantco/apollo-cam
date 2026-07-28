@@ -1,6 +1,6 @@
 # ApolloCam — Architecture
 
-State as of v0.82.
+State as of v0.88.
 
 ## System overview
 
@@ -13,10 +13,27 @@ As of v0.82 this follows a "Camera Coach" design: the live preview has no drawn 
 Key pieces:
 - `SubjectDetector` (`SubjectDetector.swift`) runs on-device detection (faces > animals > salient objects) off the camera's frame stream (`camera.onFrame`). Its output (`detector.subject`, `detector.selectedPoint`) still exists and still drives guidance — it's just not drawn anymore. Tapping the screen selects a subject; tapping near an existing selection clears it (there's no dedicated "×" button — the old visual box that carried it is gone). A tap produces a brief fading ring (`TapPulse`) instead of a persistent overlay.
 - `GuidanceEngine.evaluate(...)` (external to this file) turns detector output + the active composition rule + scene into a `Guidance` value (`message`, `aligned`, `suggestedRule`, `tips`, etc.). Only `message`/`aligned`/`suggestedRule` are actively used in the current UI; `tips` and per-scene pill data are still computed but unconsumed by the view layer now.
-- Composition rules (`CompositionRule` in `CompositionRules.swift`) still exist as a full 14-case enum with a `CompositionOverlay` drawing struct, but `CompositionOverlay` is no longer rendered on the camera screen — the geometry-on-preview approach was the main source of visual clutter and has been retired in favor of text coaching. The manual rule picker (`rulePicker` sheet) is curated down to a short list — Auto, Rule of thirds, Centered, Symmetry, Leading lines (`CameraScreen.curatedRules`) — rather than exposing all 14 cases.
+- Composition rules (`CompositionRule` in `CompositionRules.swift`) are a full 14-case enum with a `CompositionOverlay` drawing struct. v0.82 stopped rendering `CompositionOverlay` entirely; v0.88 brings it back with a `Style` distinction, because the picker had been left pointing at nothing for three versions (see `Known Issues.md`). `.reference` is a hairline white grid with no target rings — quiet enough to sit on screen permanently, which is what the original overlays failed at. `.guide` is the original cyan/green treatment with rings and green-on-aligned, used only for a rule the user selected deliberately. Rendering is gated on the `showCompositionGrid` `AppStorage` flag (Settings → Camera).
+  - **`overlayRule` is `selectedRule ?? .ruleOfThirds`, deliberately not `guidance.suggestedRule`.** Auto mode re-evaluates the suggested rule roughly four times a second; binding the drawn geometry to it would swap circles for diagonals for triangles while the user is still framing. The auto case therefore draws a fixed thirds grid, and the rule actually being coached is communicated in words by `coachingChip`. This is the same "real-time output must not move the UI" constraint that governs the tip stack.
+  - The manual rule picker (`rulePicker` sheet) stays curated to Auto, Rule of thirds, Centered, Symmetry, Leading lines (`CameraScreen.curatedRules`) rather than exposing all 14 cases.
 - Scene override (landscape/street/macro pills) has no UI control anymore; `sceneOverride` remains in state (always `nil`) and scene detection is always automatic.
-- The AI partner (`AdviceService`, `partnerHeartbeat()`) is unchanged internally — same heartbeat/stillness/token-gating logic — only its presentation changed (folds into `coachingChip`).
+- The AI partner (`AdviceService`, `partnerHeartbeat()`) keeps its heartbeat/stillness/token-gating logic. v0.88 adds two things around it: enabling Coach stashes the current zoom in `zoomBeforeCoach` and ramps the camera to `camera.minZoom` (so Claude judges the whole scene rather than the crop the user happens to be in), restoring it on disable; and `CoachTip` carries a `suggestedZoom`, surfaced as a one-tap gold chip beside the coaching line. The chip is suppressed unless the suggestion differs from the current zoom by more than 12%, so a miscalibrated model degrades to "no chip" rather than to a chip that fights the user. `AdviceService` clamps whatever Claude returns into the device's real zoom range.
 - Top bar is two icon-only circular buttons (rule picker, settings) — no persistent labeled pill.
+
+## Camera zoom (`CameraController.swift`)
+
+Two zoom scales exist and conflating them is the easy mistake:
+
+- **Device zoom** is what `AVCaptureDevice.videoZoomFactor` accepts. On a virtual multi-lens device its `1.0` is the *ultra-wide*, so the framing a person calls "1×" sits at device zoom 2.0.
+- **Display zoom** is the number a person recognises — 0.5×, 1×, 2× — where 1× is always the normal wide lens.
+
+`baseZoom` converts between them, and everything above `CameraController` (the UI, `ShotInfo.zoom`, the AI coach prompt) speaks display zoom only. `zoomFactor`, `minZoom`, `maxZoom` and `zoomStops` are all published on the display scale; `setZoom(_:animated:)` is the only place the conversion happens.
+
+Before v0.88 the session opened `.builtInWideAngleCamera`, which bottoms out at 1.0 — 0.5× was not a UI gap but a hardware one, since the ultra-wide was never in the session. `bestCamera()` now prefers the widest virtual device available (triple → dual-wide → dual → wide) and falls back gracefully; the simulator lands on the last entry, which is why 0.5× is absent there.
+
+`zoomProfile(for:)` derives the button stops from `virtualDeviceSwitchOverVideoZoomFactors` — the device zooms at which the hardware hands one lens to the next — rather than a hardcoded list, so the stops match the phone's own camera app (0.5/1/2 on a dual-wide, 0.5/1/2/5 on a triple). Two synthetic additions: a 2× stop when no lens sits there (it's a sensor crop, but it's the stop beginners reach for most) and a 3× stop on single-lens phones so the control isn't a lone button. Note the session must explicitly set `videoZoomFactor = base` at configuration time, otherwise a virtual device launches into the ultra-wide.
+
+`animated: true` uses `ramp(toVideoZoomFactor:withRate:)` for anything the user didn't drag — stop buttons, the Coach pull-back, the AI zoom chip — so framing slides rather than snapping. Pinch and the fine slider stay unanimated, since a ramp would fight a continuous gesture. In both cases the published `zoomFactor` is set to the *target* immediately rather than tracking the lens, so the on-screen label reads the value the user asked for.
 
 ## Photo editor (`PhotoEditor.swift`)
 
@@ -26,9 +43,18 @@ That first step matters more than it looks. Core Image works on the raw `CGImage
 
 `PhotoEditorView` holds `original` (full-res), `proxy` (small preview), and `rendered` (proxy + current adjustments applied). Hold-to-compare (press and hold the photo to see the original) uses a raw `DragGesture(minimumDistance: 0)` rather than `onLongPressGesture` — the latter resets its `pressing` state as soon as its `minimumDuration` elapses, before the finger lifts, which caused the comparison to flash and immediately revert. The AI-note/error bars are rendered as a bottom-pinned overlay inside the image area rather than separate stacked rows, so the displayed image is the same size whether or not a note is showing.
 
-Crop is a distinct mode (`cropMode`) rather than a slider: entering it renders an orientation-only (uncropped) version of the proxy (`cropBase`) so the user always sees the full frame regardless of any crop already applied, overlays a draggable rect (`CropOverlay`, corner-handle resize + whole-rect move, all normalized to the image's actual on-screen content rect to account for `.scaledToFit()` letterboxing), and swaps the bottom row for Cancel/Reset/Apply controls. AI-adjust routes through `applySuggestion(_:note:crop:cropNote:)`, which carries the user's `rotationQuarters` and `flipH` across an incoming suggestion (`AdjustService` builds its result from a neutral `EditAdjustments()`, so a wholesale assignment would reset them) and preserves the current `cropRect` unless the AI proposed one of its own.
+Crop is a distinct mode (`cropMode`) rather than a slider: entering it renders an orientation-only (uncropped) version of the proxy (`cropBase`) so the user always sees the full frame regardless of any crop already applied, overlays a draggable rect (`CropOverlay`, corner-handle resize + whole-rect move, all normalized to the image's actual on-screen content rect to account for `.scaledToFit()` letterboxing), and swaps the bottom row for Cancel/Reset/Apply controls. The overlay draws a thirds grid plus a separate, brighter dashed centre cross inside the crop rect — two distinct jobs, which is why the centre isn't just another grid line: thirds are for placing a subject, the centre cross is for judging symmetry, and neither third is the middle. Both are drawn against the crop rect rather than the whole image, since what's being composed is the crop. AI-adjust routes through `applySuggestion(_:note:crop:cropNote:)`, which carries the user's `rotationQuarters` and `flipH` across an incoming suggestion (`AdjustService` builds its result from a neutral `EditAdjustments()`, so a wholesale assignment would reset them) and preserves the current `cropRect` unless the AI proposed one of its own.
 
 AI crop suggestions are analysed on the *un-rotated* proxy, so `AdjustService.Result.suggestedCrop` is in a different frame from `EditAdjustments.cropRect`, which is defined after orientation. `ImagePipeline.orientedCropRect(_:quarters:flipH:)` maps between them at apply time — each clockwise quarter turn sends a normalized `(u, v)` to `(1 - v, u)`, mirroring first to match `apply()`'s order. The un-oriented rect is what gets cached on `PhotoEntry.aiCropRect` (deliberately *not* folded into `aiAdjustments.cropRect`, which means something else), so a cached suggestion stays correct if the user rotates the photo after asking for it.
+
+## Gallery (`GalleryView.swift`)
+
+A 3-column thumbnail grid over `PhotoStore.entries`, with a selection mode added in v0.88 (`selecting` / `selection: Set<UUID>`). In selection mode a tap toggles instead of opening the detail sheet, unpicked cells are dimmed rather than picked ones highlighted (with a wall of thumbnails, the bright subset is the easier thing to read), and a bulk action bar offers Save / Share / Evaluate / Delete.
+
+Two things worth preserving in the bulk actions:
+
+- `PhotoStore.delete(ids:)` is a single pass with one `persist()`, not a loop over the single-entry `delete(_:)` — the latter would rewrite the index file and republish `entries` once per photo. The single-entry version now forwards to it.
+- Bulk Evaluate is **sequential, not concurrent**. Each critique spends one of a small daily token bucket, and parallel requests would overrun the remaining balance before `TokenManager` caught up. The loop re-checks `canUseEval` each iteration and reports honestly when it stops early; already-critiqued photos are skipped so re-selecting a batch doesn't re-buy work.
 
 ## Known gaps
 

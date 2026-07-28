@@ -1,3 +1,7 @@
+> **SUPERSEDED — historical only. Do not implement from this document.**
+>
+> Both items below shipped in v0.85. Note that the rotation fix proposed here (section 2, "flip the angle sign") was **wrong** and would have broken the previously-correct preview: `-turns * .pi / 2` is right, because Core Image's origin is bottom-left. The actual cause was `imageOrientation` being dropped before the transforms — the "Fallback Fix" at the bottom of section 2 was the correct one. See `Known Issues.md` for the full write-up.
+
 # ApolloCam Handoff — AI Crops & Rotation Fix
 
 ## 1. AI Crop Suggestions Feature

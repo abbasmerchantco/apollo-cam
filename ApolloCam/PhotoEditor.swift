@@ -268,6 +268,8 @@ private struct CropOverlay: View {
                 }
                 .fill(Color.black.opacity(0.55), style: FillStyle(eoFill: true))
 
+                grid(in: frame)
+
                 Rectangle()
                     .stroke(Color.white, lineWidth: 1.5)
                     .frame(width: frame.width, height: frame.height)
@@ -280,6 +282,39 @@ private struct CropOverlay: View {
                 }
             }
         }
+    }
+
+    /// Thirds grid plus a brighter centre cross, drawn inside the crop rect.
+    ///
+    /// Two different jobs, which is why the centre is drawn separately rather than
+    /// just being another grid line. The thirds lines are for placing a subject; the
+    /// centre cross is for *symmetry* — lining a doorway, reflection or horizon up so
+    /// it sits truly central. That is impossible to judge by eye against thirds
+    /// alone, because neither third is the middle. Both live inside the crop rect,
+    /// not the whole image, since what matters is the composition being cropped TO.
+    private func grid(in frame: CGRect) -> some View {
+        ZStack {
+            Path { p in
+                for i in 1...2 {
+                    let x = frame.minX + frame.width * CGFloat(i) / 3
+                    p.move(to: CGPoint(x: x, y: frame.minY))
+                    p.addLine(to: CGPoint(x: x, y: frame.maxY))
+                    let y = frame.minY + frame.height * CGFloat(i) / 3
+                    p.move(to: CGPoint(x: frame.minX, y: y))
+                    p.addLine(to: CGPoint(x: frame.maxX, y: y))
+                }
+            }
+            .stroke(Color.white.opacity(0.35), lineWidth: 0.75)
+
+            Path { p in
+                p.move(to: CGPoint(x: frame.midX, y: frame.minY))
+                p.addLine(to: CGPoint(x: frame.midX, y: frame.maxY))
+                p.move(to: CGPoint(x: frame.minX, y: frame.midY))
+                p.addLine(to: CGPoint(x: frame.maxX, y: frame.midY))
+            }
+            .stroke(Color.white.opacity(0.65), style: StrokeStyle(lineWidth: 0.75, dash: [5, 4]))
+        }
+        .allowsHitTesting(false)
     }
 
     private func handle(_ corner: Corner, frame: CGRect, content: CGRect) -> some View {

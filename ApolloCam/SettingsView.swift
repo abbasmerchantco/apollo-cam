@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var keySaved = Keychain.loadAPIKey() != nil
     @ObservedObject private var tokenManager = TokenManager.shared
     @AppStorage("critiqueModel") private var model = "claude-haiku-4-5-20251001"
+    @AppStorage("showCompositionGrid") private var showGrid = true
 
     private let gold = Color(red: 0.98, green: 0.75, blue: 0.24)
 
@@ -59,6 +60,14 @@ struct SettingsView: View {
                     Text("Anthropic API key")
                 } footer: {
                     Text("Powers the photo critique coach. Create a key at console.anthropic.com → API keys. Stored securely in the iOS Keychain, only ever sent to api.anthropic.com.")
+                }
+
+                Section {
+                    Toggle("Composition grid", isOn: $showGrid)
+                } header: {
+                    Text("Camera")
+                } footer: {
+                    Text("Shows a rule-of-thirds grid over the live preview. Choosing a specific guide from the camera's composition button replaces it with that guide's shape.")
                 }
 
                 Section {

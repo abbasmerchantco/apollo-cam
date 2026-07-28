@@ -94,14 +94,37 @@ enum CompositionRule: String, CaseIterable, Identifiable, Codable {
 
 /// Overlay drawing for each composition rule.
 struct CompositionOverlay: View {
+    /// How loudly to draw.
+    ///
+    /// v0.82 removed these overlays entirely because a bright, animated, always-on
+    /// geometry layer made the preview unreadable. They're back in v0.88 because a
+    /// beginner can't act on "move your subject left" without a reference to move it
+    /// against — but the always-on case now uses `.reference`, which is a thin white
+    /// grid that reads as viewfinder furniture rather than an active instruction.
+    /// `.guide` is the old treatment, reserved for a rule the user chose on purpose.
+    enum Style: Equatable {
+        /// Hairline white grid, no target rings, no alignment colour. Always-on default.
+        case reference
+        /// Full cyan/green treatment with target rings — an explicitly chosen rule.
+        case guide
+    }
+
     let rule: CompositionRule
     let aligned: Bool
+    var style: Style = .guide
     /// Normalized (0–1) subject centre. When set, converging overlays aim here.
     var focusPoint: CGPoint? = nil
 
     private var lineColor: Color {
-        aligned ? Color.green.opacity(0.95) : Color(red: 0.0, green: 0.9, blue: 1.0).opacity(0.9)
+        switch style {
+        case .reference:
+            return Color.white.opacity(0.32)
+        case .guide:
+            return aligned ? Color.green.opacity(0.95) : Color(red: 0.0, green: 0.9, blue: 1.0).opacity(0.9)
+        }
     }
+
+    private var lineWidth: CGFloat { style == .reference ? 0.75 : 1.8 }
 
     var body: some View {
         GeometryReader { geo in
@@ -180,13 +203,18 @@ struct CompositionOverlay: View {
                                control2: CGPoint(x: -w * 0.05, y: h * 0.35))
                 }
             }
-            .stroke(lineColor, style: StrokeStyle(lineWidth: 1.8, dash: rule == .leadingLines || rule == .vanishingPoint ? [7, 4] : []))
+            .stroke(lineColor, style: StrokeStyle(lineWidth: lineWidth,
+                                                 dash: rule == .leadingLines || rule == .vanishingPoint ? [7, 4] : []))
+            // A hairline grid over a bright sky is invisible without this.
+            .shadow(color: .black.opacity(style == .reference ? 0.35 : 0), radius: 1)
 
-            ForEach(Array(rule.targetPoints(in: geo.size).enumerated()), id: \.offset) { _, pt in
-                Circle()
-                    .stroke(lineColor, lineWidth: 1.5)
-                    .frame(width: 14, height: 14)
-                    .position(pt)
+            if style == .guide {
+                ForEach(Array(rule.targetPoints(in: geo.size).enumerated()), id: \.offset) { _, pt in
+                    Circle()
+                        .stroke(lineColor, lineWidth: 1.5)
+                        .frame(width: 14, height: 14)
+                        .position(pt)
+                }
             }
         }
         .allowsHitTesting(false)
