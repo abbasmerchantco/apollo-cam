@@ -21,6 +21,11 @@ struct PhotoEntry: Codable, Identifiable {
     // whenever the image itself changes (see PhotoStore.replaceImage).
     var aiAdjustments: EditAdjustments? = nil
     var aiAdjustNote: String? = nil
+    /// Suggested crop, stored in the *un-oriented* frame (see `AdjustService.Result`)
+    /// so it survives the user rotating the photo after the analysis was made. It is
+    /// deliberately kept out of `aiAdjustments.cropRect`, which means something else.
+    var aiCropRect: CGRect? = nil
+    var aiCropNote: String? = nil
 
     var filename: String { "\(id.uuidString).jpg" }
 }
@@ -89,10 +94,16 @@ final class PhotoStore: ObservableObject {
 
     /// Persist the AI's suggested correction so a later editor session can reuse it
     /// without another API call.
-    func attachAIAdjustments(_ adjustments: EditAdjustments, note: String, to id: UUID) {
+    func attachAIAdjustments(_ adjustments: EditAdjustments,
+                             note: String,
+                             cropRect: CGRect? = nil,
+                             cropNote: String? = nil,
+                             to id: UUID) {
         guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[i].aiAdjustments = adjustments
         entries[i].aiAdjustNote = note
+        entries[i].aiCropRect = cropRect
+        entries[i].aiCropNote = cropNote
         persist()
     }
 
@@ -114,6 +125,8 @@ final class PhotoStore: ObservableObject {
         if let i = entries.firstIndex(where: { $0.id == entry.id }) {
             entries[i].aiAdjustments = nil
             entries[i].aiAdjustNote = nil
+            entries[i].aiCropRect = nil
+            entries[i].aiCropNote = nil
             persist()
         }
         objectWillChange.send()

@@ -1,13 +1,28 @@
 # ApolloCam — Known Issues
 
-State as of v0.82.
+State as of v0.85.
 
 ## Open
 
-### Rotate saves with one fewer turn than executed (unconfirmed cause)
-Reported: rotating the photo in the editor and saving sometimes produces an image rotated one 90° turn less than the number of times the rotate button was tapped.
+Nothing currently open. The rotate/save bug that headed this section since v0.6 is fixed in v0.85 — see below.
 
-Investigated: `EditAdjustments.rotationQuarters` is absolute (not compounded), and `ImagePipeline.apply` recomputes rotation fresh from the untouched `original`/`proxy` every time — both the live preview render and the final save read the same `adj` snapshot synchronously, so no arithmetic or obvious race was found by inspection. Root cause is not yet confirmed. Next step before attempting a fix: reproduce with logging (`adj.rotationQuarters` at each tap vs. at the moment `save()` captures its snapshot) to see exactly where the count diverges, rather than guessing. Explicitly out of scope for the v0.82 changes below — left untouched per instruction.
+## Fixed in v0.85
+
+### Rotate/save produced incorrect rotation
+
+**Root cause:** `ImagePipeline.apply` built its `CIImage` with `CIImage(image:)`, which reads the underlying `CGImage` pixel buffer and ignores UIKit's `imageOrientation`. A camera capture is almost always `.right` (the sensor is landscape), so the buffer is a quarter-turn away from what the user sees. Every transform therefore ran in sensor space, and the result was written back out tagged `.up` — discarding the quarter turn the metadata would have supplied.
+
+That accounts for both reported manifestations, which were always the same fault: the output lands exactly one 90° turn short of intent, which reads as "one turn fewer than I tapped" when rotating and as "rotated 90° anti-clockwise" when not.
+
+**Why it looked like a preview/save divergence:** the preview path renders from `proxy`, and `ImagePipeline.preview(from:)` re-draws through `UIImage.draw(in:)`, which *does* honour `imageOrientation`. So the proxy arrives at `apply()` already normalized to `.up` and previews were correct. The save path renders from the untouched `original`, which is not. Two paths, two different pixel frames.
+
+**Why the sign hypothesis was wrong:** `-turns * .pi / 2` is correct. Core Image's origin is bottom-left with +y up, so a negative angle rotates clockwise, matching `rotationQuarters`' documented meaning and the `rotate.right` button. Flipping the sign would have inverted the (already correct) preview, and would not have explained the earlier "one turn fewer" report at all — a sign error leaves a 180° rotation looking correct, whereas a fixed one-turn offset does not.
+
+**Fix:** bake `imageOrientation` into the pixels at the top of `ImagePipeline.apply()` via `CIImage.oriented(_:)` before any transform, so both paths work in the same frame. `PhotoEditor.swift`.
+
+### AI Adjust discarded the user's rotate/flip
+
+`aiAdjust()` assigned `AdjustService`'s result wholesale onto `adj`. That result is built from a neutral `EditAdjustments()`, so `rotationQuarters` and `flipH` were reset to zero — the existing crop was carefully preserved, but orientation was not. Both are now carried across in `applySuggestion`.
 
 ## Fixed in v0.82
 

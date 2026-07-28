@@ -8,6 +8,15 @@ enum AdjustService {
     struct Result {
         let adjustments: EditAdjustments
         let note: String
+        /// Suggested crop, or nil when the framing is already good. Normalized
+        /// (0...1) with a top-left origin, expressed against the image *as sent* —
+        /// i.e. before the user's `rotationQuarters`/`flipH` are applied. Callers
+        /// must map it into the oriented frame via `ImagePipeline.orientedCropRect`
+        /// before assigning it to `EditAdjustments.cropRect`. Keeping it in the
+        /// un-oriented frame is what lets the cached suggestion stay valid when the
+        /// user rotates the photo after the analysis was made.
+        let suggestedCrop: CGRect?
+        let cropNote: String?
     }
 
     static func suggestAdjustments(for image: UIImage) async throws -> Result {
@@ -41,8 +50,19 @@ Value ranges (stay inside them):
 
 Typical corrections are small: values between -0.4 and 0.4. Reserve anything larger for clearly broken exposure or a strong colour cast.
 
+CROP
+
+Then judge the framing. Propose a crop ONLY if one would clearly improve the photograph — dead space around the subject, a subject stranded off-balance, a distracting element at an edge. If the framing is already working, return null. Most photographs should get null; the same restraint that applies to the colour values applies here.
+
+The crop is given in fractions of the image with (0,0) at the TOP-LEFT corner:
+- x, y: top-left corner of the crop
+- width, height: size of the crop
+All four are 0 to 1, and x+width and y+height must not exceed 1.
+
+Never go below 0.4 for width or height — this is a photograph being re-framed, not a detail being extracted. Never cut through a face or through the main subject.
+
 Respond with ONLY this JSON, no code fences, no preamble:
-{"exposure": 0, "brightness": 0, "contrast": 0, "saturation": 0, "warmth": 0, "tint": 0, "highlights": 0, "shadows": 0, "sharpness": 0, "vignette": 0, "note": "<max 18 words naming what you corrected and why>"}
+{"exposure": 0, "brightness": 0, "contrast": 0, "saturation": 0, "warmth": 0, "tint": 0, "highlights": 0, "shadows": 0, "sharpness": 0, "vignette": 0, "note": "<max 18 words naming what you corrected and why>", "crop": null, "cropNote": "<max 14 words on why this crop, or empty if crop is null>"}
 """
 
         let body: [String: Any] = [
@@ -85,6 +105,13 @@ Respond with ONLY this JSON, no code fences, no preamble:
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        struct CropPayload: Decodable {
+            let x: Double?
+            let y: Double?
+            let width: Double?
+            let height: Double?
+        }
+
         struct Payload: Decodable {
             let exposure: Double?
             let brightness: Double?
@@ -97,6 +124,8 @@ Respond with ONLY this JSON, no code fences, no preamble:
             let sharpness: Double?
             let vignette: Double?
             let note: String?
+            let crop: CropPayload?
+            let cropNote: String?
         }
 
         guard let d = cleaned.data(using: .utf8),
@@ -121,7 +150,27 @@ Respond with ONLY this JSON, no code fences, no preamble:
         a.sharpness  = c(p.sharpness,   0, 1)
         a.vignette   = c(p.vignette,    0, 1)
 
+        // Crop is optional and rejected outright unless it is well-formed, inside
+        // the frame, and actually a crop. A malformed rect here would silently
+        // throw away most of the photograph, so the bar is deliberately high.
+        var suggestedCrop: CGRect?
+        if let cp = p.crop,
+           let x = cp.x, let y = cp.y, let w = cp.width, let h = cp.height,
+           x.isFinite, y.isFinite, w.isFinite, h.isFinite {
+            let r = CGRect(x: x, y: y, width: w, height: h)
+            let insideFrame = r.minX >= -0.001 && r.minY >= -0.001
+                && r.maxX <= 1.001 && r.maxY <= 1.001
+            let bigEnough = r.width >= 0.4 && r.height >= 0.4
+            let isFullFrame = r.width > 0.99 && r.height > 0.99
+            if insideFrame, bigEnough, !isFullFrame {
+                suggestedCrop = r.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+        }
+
         let note = (p.note?.isEmpty == false ? p.note! : "Applied a light correction.")
-        return Result(adjustments: a, note: note)
+        let cropNote = suggestedCrop == nil ? nil
+            : (p.cropNote?.isEmpty == false ? p.cropNote! : "Tightened the framing.")
+        return Result(adjustments: a, note: note,
+                      suggestedCrop: suggestedCrop, cropNote: cropNote)
     }
 }

@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import ImageIO
 import UIKit
 
 // MARK: - Adjustment model
@@ -54,13 +55,51 @@ struct EditTool: Identifiable {
 
 // MARK: - Rendering pipeline
 
+private extension UIImage.Orientation {
+    /// UIKit and Core Image describe orientation with two different enums whose
+    /// cases correspond one-to-one by name but not by raw value, so map explicitly.
+    var cgImageOrientation: CGImagePropertyOrientation {
+        switch self {
+        case .up:            return .up
+        case .upMirrored:    return .upMirrored
+        case .down:          return .down
+        case .downMirrored:  return .downMirrored
+        case .left:          return .left
+        case .leftMirrored:  return .leftMirrored
+        case .right:         return .right
+        case .rightMirrored: return .rightMirrored
+        @unknown default:    return .up
+        }
+    }
+}
+
 enum ImagePipeline {
     /// Shared context — creating a CIContext per render is very expensive.
     static let context = CIContext(options: [.useSoftwareRenderer: false])
 
     /// Applies adjustments and returns a new UIImage. Pure: never mutates the input.
     static func apply(_ adj: EditAdjustments, to image: UIImage) -> UIImage {
-        guard var ci = CIImage(image: image) else { return image }
+        // 0. Bake `imageOrientation` into the pixels before anything else.
+        //
+        //    Core Image operates on the raw CGImage buffer and ignores UIKit's
+        //    `imageOrientation`. A camera capture is almost always `.right` (the
+        //    sensor is landscape), so without this step every transform below runs
+        //    in sensor space while the result is written back out as `.up` —
+        //    landing 90° away from what the user framed. The preview path escaped
+        //    this because `preview(from:)` re-draws through `UIImage.draw`, which
+        //    *does* honour orientation; that mismatch is why previews looked right
+        //    and only saves came out rotated.
+        let base: CIImage
+        if let cg = image.cgImage {
+            base = CIImage(cgImage: cg)
+        } else if let existing = image.ciImage {
+            base = existing
+        } else {
+            return image
+        }
+        var ci = base.oriented(image.imageOrientation.cgImageOrientation)
+        ci = ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x,
+                                                  y: -ci.extent.origin.y))
 
         // 1. Orientation first, so later filters work on the final framing.
         if adj.flipH {
@@ -168,6 +207,37 @@ enum ImagePipeline {
         return UIGraphicsImageRenderer(size: size).image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }
+    }
+
+    /// Maps a normalized (0...1, top-left origin) rect from the *un-oriented* image
+    /// frame into the frame produced by `flipH` + `rotationQuarters` — which is the
+    /// frame `EditAdjustments.cropRect` is defined against.
+    ///
+    /// Used for AI crop suggestions: the analysis is done on the un-rotated proxy,
+    /// so the returned rect has to be carried through the same orientation steps
+    /// `apply()` performs. Normalized coordinates rotate cleanly even though the
+    /// aspect ratio flips, because each frame is normalized against its own bounds.
+    static func orientedCropRect(_ rect: CGRect, quarters: Int, flipH: Bool) -> CGRect {
+        var a = CGPoint(x: rect.minX, y: rect.minY)
+        var b = CGPoint(x: rect.maxX, y: rect.maxY)
+
+        // Mirror first, matching the order in `apply()`.
+        if flipH {
+            a.x = 1 - a.x
+            b.x = 1 - b.x
+        }
+
+        // Each quarter turn clockwise sends (u, v) to (1 - v, u).
+        let turns = ((quarters % 4) + 4) % 4
+        for _ in 0..<turns {
+            a = CGPoint(x: 1 - a.y, y: a.x)
+            b = CGPoint(x: 1 - b.y, y: b.x)
+        }
+
+        return CGRect(x: min(a.x, b.x),
+                      y: min(a.y, b.y),
+                      width: abs(b.x - a.x),
+                      height: abs(b.y - a.y))
     }
 }
 
@@ -691,10 +761,41 @@ struct PhotoEditorView: View {
 
     /// The suggestion already stored for this photo, if any. Read fresh from the
     /// store rather than the `entry` copy this view was created with.
-    private var cachedSuggestion: (adjustments: EditAdjustments, note: String)? {
+    private var cachedSuggestion: (adjustments: EditAdjustments, note: String,
+                                   crop: CGRect?, cropNote: String?)? {
         guard let fresh = PhotoStore.shared.entries.first(where: { $0.id == entry.id }),
               let a = fresh.aiAdjustments else { return nil }
-        return (a, fresh.aiAdjustNote ?? "Reapplied the saved AI correction.")
+        return (a, fresh.aiAdjustNote ?? "Reapplied the saved AI correction.",
+                fresh.aiCropRect, fresh.aiCropNote)
+    }
+
+    /// Lands a suggestion on the sliders.
+    ///
+    /// The AI only ever reasons about tone and framing, so the user's own
+    /// orientation choices are carried across rather than reset — assigning the
+    /// suggestion wholesale would otherwise silently undo a rotate or flip, since
+    /// `AdjustService` builds its result from a neutral `EditAdjustments()`.
+    ///
+    /// The crop is the one value the AI is allowed to overwrite. It arrives in the
+    /// un-oriented analysis frame and is mapped into the current oriented frame; if
+    /// no crop was suggested, whatever the user had cropped is left alone.
+    private func applySuggestion(_ adjustments: EditAdjustments,
+                                 note: String,
+                                 crop: CGRect?,
+                                 cropNote: String?) {
+        let keepCrop = adj.cropRect
+        let quarters = adj.rotationQuarters
+        let flipH = adj.flipH
+        withAnimation {
+            adj = adjustments
+            adj.rotationQuarters = quarters
+            adj.flipH = flipH
+            adj.cropRect = crop.map {
+                ImagePipeline.orientedCropRect($0, quarters: quarters, flipH: flipH)
+            } ?? keepCrop
+            aiNote = [note, cropNote].compactMap { $0 }.joined(separator: " ")
+        }
+        render()
     }
 
     private func aiAdjust() {
@@ -703,13 +804,8 @@ struct PhotoEditorView: View {
         // only discarded when the image itself is edited and saved.
         if let cached = cachedSuggestion {
             aiError = nil
-            let keepCrop = adj.cropRect
-            withAnimation {
-                adj = cached.adjustments
-                adj.cropRect = keepCrop
-                aiNote = cached.note
-            }
-            render()
+            applySuggestion(cached.adjustments, note: cached.note,
+                            crop: cached.crop, cropNote: cached.cropNote)
             Haptics.tap()
             return
         }
@@ -725,18 +821,15 @@ struct PhotoEditorView: View {
             do {
                 let result = try await AdjustService.suggestAdjustments(for: proxy)
                 await MainActor.run {
-                    let keepCrop = adj.cropRect
-                    withAnimation {
-                        adj = result.adjustments
-                        adj.cropRect = keepCrop
-                        aiNote = result.note
-                    }
+                    applySuggestion(result.adjustments, note: result.note,
+                                    crop: result.suggestedCrop, cropNote: result.cropNote)
                     tokenManager.useEvalToken()
                     PhotoStore.shared.attachAIAdjustments(result.adjustments,
                                                           note: result.note,
+                                                          cropRect: result.suggestedCrop,
+                                                          cropNote: result.cropNote,
                                                           to: entry.id)
                     aiLoading = false
-                    render()
                 }
             } catch {
                 await MainActor.run {
