@@ -335,7 +335,7 @@ enum ImagePipeline {
         func warp(_ p: CGPoint) -> CGPoint {
             let dx = (p.x - 0.5) * w
             let dy = (p.y - 0.5) * h
-            let theta = straighten * .pi / 180
+            let theta = CGFloat(straighten) * .pi / 180
             let ratio = max(w, h) / min(w, h)
             let scale = cos(abs(theta)) + sin(abs(theta)) * ratio
             let dx2 = scale * (cos(theta) * dx - sin(theta) * dy)
