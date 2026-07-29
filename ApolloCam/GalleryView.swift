@@ -12,6 +12,16 @@ struct ActivityView: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
+/// Reports each gallery cell's frame (in the grid's named coordinate space)
+/// so a drag gesture over the grid can hit-test which entry a finger is
+/// currently over, for swipe-to-select.
+private struct CellFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 struct GalleryView: View {
     @ObservedObject private var store = PhotoStore.shared
     @State private var selected: PhotoEntry?
@@ -21,6 +31,11 @@ struct GalleryView: View {
     // Multi-select
     @State private var selecting = false
     @State private var selection: Set<UUID> = []
+    // Swipe-to-select: cell frames (keyed by entry) reported via preference,
+    // plus the state of the drag currently painting a selection swath, if any.
+    @State private var cellFrames: [UUID: CGRect] = [:]
+    @State private var dragSelectAdding: Bool?
+    @State private var dragTouchedIDs: Set<UUID> = []
     @State private var confirmBulkDelete = false
     @State private var shareItems: [UIImage]?
     /// Non-nil while a bulk AI evaluation is running: (done, total).
@@ -146,9 +161,51 @@ struct GalleryView: View {
                         cell(entry)
                     }
                     .disabled(busy)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: CellFramePreferenceKey.self,
+                                value: [entry.id: proxy.frame(in: .named("galleryGrid"))]
+                            )
+                        }
+                    )
                 }
             }
         }
+        .coordinateSpace(name: "galleryGrid")
+        .onPreferenceChange(CellFramePreferenceKey.self) { cellFrames = $0 }
+        // Drag across cells to mass-select, mirroring Photos' swipe-select.
+        // `including` keeps this out of the way entirely while browsing
+        // normally — outside select mode the grid's own scroll/tap gestures
+        // are untouched.
+        .simultaneousGesture(dragSelectGesture, including: selecting ? .all : .subviews)
+    }
+
+    /// The first cell touched by a drag decides the mode for that whole
+    /// gesture: painting over an unselected cell selects the swath, painting
+    /// over an already-selected one deselects it. Each cell is only touched
+    /// once per drag so a lingering or doubling-back finger doesn't flicker.
+    private var dragSelectGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .named("galleryGrid"))
+            .onChanged { value in
+                guard selecting, !busy else { return }
+                guard let id = entryID(at: value.location) else { return }
+                if dragSelectAdding == nil {
+                    dragSelectAdding = !selection.contains(id)
+                }
+                guard let adding = dragSelectAdding, !dragTouchedIDs.contains(id) else { return }
+                dragTouchedIDs.insert(id)
+                if adding { selection.insert(id) } else { selection.remove(id) }
+                Haptics.tap()
+            }
+            .onEnded { _ in
+                dragSelectAdding = nil
+                dragTouchedIDs = []
+            }
+    }
+
+    private func entryID(at point: CGPoint) -> UUID? {
+        cellFrames.first { _, frame in frame.contains(point) }?.key
     }
 
     private func cell(_ entry: PhotoEntry) -> some View {

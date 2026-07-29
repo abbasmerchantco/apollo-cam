@@ -23,12 +23,53 @@ struct EditAdjustments: Codable, Equatable {
     // Orientation
     var rotationQuarters: Int = 0 // number of 90° clockwise turns
     var flipH: Bool = false
+    var straighten: Double = 0    // -45 ... 45  (fine rotation, degrees clockwise;
+                                   // horizon leveling / precise rotation tool)
 
     // Crop — normalized (0...1), top-left origin, relative to the image
     // *after* orientation has been applied. (0,0,1,1) means "no crop".
     var cropRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     var isNeutral: Bool { self == EditAdjustments() }
+
+    // MARK: Codable
+    //
+    // Custom-decoded (rather than relying on synthesis) so that adding a new
+    // field — like `straighten` here — never breaks decoding of adjustments
+    // saved by an older build. Synthesized `Decodable` treats every stored
+    // property as a required key regardless of its default value; on a
+    // personal-use app whose local `PhotoStore` JSON persists across
+    // TestFlight-less installs, a `keyNotFound` failure on ANY one entry fails
+    // `JSONDecoder().decode([PhotoEntry].self, ...)` for the *entire* array
+    // (see `PhotoStore.load()`, which swallows the error via `try?`) — so the
+    // whole gallery index would silently come back empty. `decodeIfPresent`
+    // with a fallback makes every field additive and old data safe to load.
+    enum CodingKeys: String, CodingKey {
+        case exposure, brightness, contrast, saturation, warmth, tint
+        case highlights, shadows, sharpness, vignette
+        case rotationQuarters, flipH, straighten, cropRect
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposure   = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+        brightness = try c.decodeIfPresent(Double.self, forKey: .brightness) ?? 0
+        contrast   = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        warmth     = try c.decodeIfPresent(Double.self, forKey: .warmth) ?? 0
+        tint       = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
+        shadows    = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        sharpness  = try c.decodeIfPresent(Double.self, forKey: .sharpness) ?? 0
+        vignette   = try c.decodeIfPresent(Double.self, forKey: .vignette) ?? 0
+        rotationQuarters = try c.decodeIfPresent(Int.self, forKey: .rotationQuarters) ?? 0
+        flipH      = try c.decodeIfPresent(Bool.self, forKey: .flipH) ?? false
+        straighten = try c.decodeIfPresent(Double.self, forKey: .straighten) ?? 0
+        cropRect   = try c.decodeIfPresent(CGRect.self, forKey: .cropRect)
+            ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
 }
 
 /// One editable parameter, described once so the UI can be generated from it.
@@ -49,7 +90,8 @@ struct EditTool: Identifiable {
         EditTool(id: "highlights", name: "Highlights", icon: "circle.tophalf.filled",    range: -1...1, keyPath: \.highlights),
         EditTool(id: "shadows",    name: "Shadows",    icon: "circle.bottomhalf.filled", range: -1...1, keyPath: \.shadows),
         EditTool(id: "sharpness",  name: "Sharpen",    icon: "triangle",                 range:  0...1, keyPath: \.sharpness),
-        EditTool(id: "vignette",   name: "Vignette",   icon: "circle.dashed",            range:  0...1, keyPath: \.vignette)
+        EditTool(id: "vignette",   name: "Vignette",   icon: "circle.dashed",            range:  0...1, keyPath: \.vignette),
+        EditTool(id: "straighten", name: "Straighten", icon: "gyroscope",                range: -45...45, keyPath: \.straighten)
     ]
 }
 
@@ -113,6 +155,33 @@ enum ImagePipeline {
             // Re-origin so extent starts at zero after rotating.
             ci = ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x,
                                                       y: -ci.extent.origin.y))
+        }
+
+        // 1.2. Straighten — fine rotation (horizon leveling / precise rotation),
+        // applied about the image center with just enough zoom to eliminate the
+        // empty wedges the rotation would otherwise expose at the corners. This
+        // must run after the 90°/flip orientation step but before crop (1.5),
+        // since the crop rect is defined relative to this frame.
+        if adj.straighten != 0 {
+            let w = ci.extent.width, h = ci.extent.height
+            if w > 0, h > 0 {
+                // Positive `straighten` means clockwise-on-screen, matching the
+                // sign convention `rotationQuarters` already uses above.
+                let radians = -CGFloat(adj.straighten) * .pi / 180
+                let a = abs(radians)
+                let ratio = max(w, h) / min(w, h)
+                let scale = cos(a) + sin(a) * ratio
+                let center = CGPoint(x: ci.extent.midX, y: ci.extent.midY)
+                var t = CGAffineTransform(translationX: -center.x, y: -center.y)
+                t = t.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+                t = t.concatenating(CGAffineTransform(rotationAngle: radians))
+                t = t.concatenating(CGAffineTransform(translationX: center.x, y: center.y))
+                ci = ci.transformed(by: t)
+                let cropRect = CGRect(x: center.x - w / 2, y: center.y - h / 2, width: w, height: h)
+                ci = ci.cropped(to: cropRect)
+                ci = ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x,
+                                                          y: -ci.extent.origin.y))
+            }
         }
 
         // 1.5. Crop — normalized rect relative to the now-oriented image. Core
@@ -467,12 +536,16 @@ struct PhotoEditorView: View {
             Color.black
 
             if cropMode, let base = cropBase {
+                // Inset from the container edge so corner handles land away from
+                // the physical screen edge/bezel — right at 0/max they were nearly
+                // impossible to get a finger around for a diagonal drag.
                 CropOverlay(rect: $cropDraft, imageSize: base.size)
                     .background(
                         Image(uiImage: base)
                             .resizable()
                             .scaledToFit()
                     )
+                    .padding(22)
             } else if let shown = showingOriginal ? proxy : (rendered ?? proxy) {
                 Image(uiImage: shown)
                     .resizable()
@@ -607,6 +680,9 @@ struct PhotoEditorView: View {
 
     private var valueLabel: String {
         let v = adj[keyPath: selectedTool.keyPath]
+        if selectedTool.id == "straighten" {
+            return String(format: v > 0 ? "+%.1f°" : "%.1f°", v)
+        }
         return String(format: v > 0 ? "+%.2f" : "%.2f", v)
     }
 
@@ -762,7 +838,15 @@ struct PhotoEditorView: View {
     /// currently applied crop.
     private func enterCropMode() {
         guard let proxy else { return }
-        let orientationOnly = EditAdjustments(rotationQuarters: adj.rotationQuarters, flipH: adj.flipH)
+        // Must mirror every step `ImagePipeline.apply` runs *before* its crop
+        // stage (orientation, then straighten) — the crop rect the user draws
+        // here is defined relative to this exact frame, and if straighten were
+        // left out the drawn crop would land somewhere else once the real
+        // straighten rotation is applied on save.
+        var orientationOnly = EditAdjustments()
+        orientationOnly.rotationQuarters = adj.rotationQuarters
+        orientationOnly.flipH = adj.flipH
+        orientationOnly.straighten = adj.straighten
         cropBase = ImagePipeline.apply(orientationOnly, to: proxy)
         cropDraft = adj.cropRect
         cropMode = true
@@ -807,13 +891,16 @@ struct PhotoEditorView: View {
     /// Lands a suggestion on the sliders.
     ///
     /// The AI only ever reasons about tone and framing, so the user's own
-    /// orientation choices are carried across rather than reset — assigning the
-    /// suggestion wholesale would otherwise silently undo a rotate or flip, since
-    /// `AdjustService` builds its result from a neutral `EditAdjustments()`.
+    /// discrete orientation choices (90° rotate, flip) are carried across
+    /// rather than reset — assigning the suggestion wholesale would otherwise
+    /// silently undo a rotate or flip, since `AdjustService` builds its result
+    /// from a neutral `EditAdjustments()`.
     ///
-    /// The crop is the one value the AI is allowed to overwrite. It arrives in the
-    /// un-oriented analysis frame and is mapped into the current oriented frame; if
-    /// no crop was suggested, whatever the user had cropped is left alone.
+    /// Crop and straighten are the two values the AI *is* allowed to overwrite,
+    /// since both are genuine analysis results (framing, horizon level) rather
+    /// than user preference. Crop arrives in the un-oriented analysis frame and
+    /// is mapped into the current oriented frame; if no crop was suggested,
+    /// whatever the user had cropped is left alone.
     private func applySuggestion(_ adjustments: EditAdjustments,
                                  note: String,
                                  crop: CGRect?,

@@ -50,6 +50,10 @@ Value ranges (stay inside them):
 
 Typical corrections are small: values between -0.4 and 0.4. Reserve anything larger for clearly broken exposure or a strong colour cast.
 
+HORIZON
+
+Also check the image for a tilted horizon or a vertical reference that should be upright — a sea/land horizon line, a building edge, a doorframe, a horizon implied by the ground plane. If one is visibly off-level, return a "straighten" value in DEGREES to rotate the image so it reads level: positive rotates clockwise, negative rotates counter-clockwise. Most photos are already level — return 0 unless you can actually see the tilt. Typical corrections are small, -10 to 10 degrees; only go higher for an obviously crooked shot. Never invent a horizon that isn't visibly there just to justify a non-zero value.
+
 CROP
 
 Then judge the framing. Propose a crop ONLY if one would clearly improve the photograph — dead space around the subject, a subject stranded off-balance, a distracting element at an edge. If the framing is already working, return null. Most photographs should get null; the same restraint that applies to the colour values applies here.
@@ -62,7 +66,7 @@ All four are 0 to 1, and x+width and y+height must not exceed 1.
 Never go below 0.4 for width or height — this is a photograph being re-framed, not a detail being extracted. Never cut through a face or through the main subject.
 
 Respond with ONLY this JSON, no code fences, no preamble:
-{"exposure": 0, "brightness": 0, "contrast": 0, "saturation": 0, "warmth": 0, "tint": 0, "highlights": 0, "shadows": 0, "sharpness": 0, "vignette": 0, "note": "<max 18 words naming what you corrected and why>", "crop": null, "cropNote": "<max 14 words on why this crop, or empty if crop is null>"}
+{"exposure": 0, "brightness": 0, "contrast": 0, "saturation": 0, "warmth": 0, "tint": 0, "highlights": 0, "shadows": 0, "sharpness": 0, "vignette": 0, "straighten": 0, "note": "<max 18 words naming what you corrected and why>", "crop": null, "cropNote": "<max 14 words on why this crop, or empty if crop is null>"}
 """
 
         let body: [String: Any] = [
@@ -123,6 +127,7 @@ Respond with ONLY this JSON, no code fences, no preamble:
             let shadows: Double?
             let sharpness: Double?
             let vignette: Double?
+            let straighten: Double?
             let note: String?
             let crop: CropPayload?
             let cropNote: String?
@@ -149,6 +154,7 @@ Respond with ONLY this JSON, no code fences, no preamble:
         a.shadows    = c(p.shadows,    -1, 1)
         a.sharpness  = c(p.sharpness,   0, 1)
         a.vignette   = c(p.vignette,    0, 1)
+        a.straighten = c(p.straighten, -45, 45)
 
         // Crop is optional and rejected outright unless it is well-formed, inside
         // the frame, and actually a crop. A malformed rect here would silently
