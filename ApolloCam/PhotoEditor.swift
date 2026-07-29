@@ -278,15 +278,23 @@ enum ImagePipeline {
         }
     }
 
-    /// Maps a normalized (0...1, top-left origin) rect from the *un-oriented* image
-    /// frame into the frame produced by `flipH` + `rotationQuarters` — which is the
-    /// frame `EditAdjustments.cropRect` is defined against.
+    /// Maps a normalized (0...1, top-left origin) rect from the *un-oriented,
+    /// un-straightened* analysis frame into the frame produced by `flipH` +
+    /// `rotationQuarters` + `straighten` — which is the frame
+    /// `EditAdjustments.cropRect` is defined against, matching the order
+    /// `apply()` runs those three steps in.
     ///
-    /// Used for AI crop suggestions: the analysis is done on the un-rotated proxy,
-    /// so the returned rect has to be carried through the same orientation steps
-    /// `apply()` performs. Normalized coordinates rotate cleanly even though the
-    /// aspect ratio flips, because each frame is normalized against its own bounds.
-    static func orientedCropRect(_ rect: CGRect, quarters: Int, flipH: Bool) -> CGRect {
+    /// Used for AI Adjust: crop and straighten are both reasoned about against
+    /// the same un-rotated, un-straightened proxy in a single model call, so a
+    /// suggested crop has to be carried through the same orientation steps
+    /// `apply()` performs — including the suggested straighten itself, or the
+    /// two suggestions would visibly disagree once both are applied together.
+    /// `unorientedSize` is the proxy's own pixel size (before any of the three
+    /// steps), needed because the straighten step is a real rotation and,
+    /// unlike the 90°/flip remap, isn't aspect-neutral.
+    static func orientedCropRect(_ rect: CGRect, quarters: Int, flipH: Bool,
+                                  straighten: Double = 0,
+                                  unorientedSize: CGSize = .zero) -> CGRect {
         var a = CGPoint(x: rect.minX, y: rect.minY)
         var b = CGPoint(x: rect.maxX, y: rect.maxY)
 
@@ -303,10 +311,110 @@ enum ImagePipeline {
             b = CGPoint(x: 1 - b.y, y: b.x)
         }
 
-        return CGRect(x: min(a.x, b.x),
-                      y: min(a.y, b.y),
-                      width: abs(b.x - a.x),
-                      height: abs(b.y - a.y))
+        guard straighten != 0 else {
+            return CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                          width: abs(b.x - a.x), height: abs(b.y - a.y))
+        }
+
+        // Oriented (post quarters/flip, pre-straighten) pixel size — an odd
+        // number of quarter turns swaps width and height; flip does not.
+        let swapped = turns % 2 == 1
+        let w = swapped ? unorientedSize.height : unorientedSize.width
+        let h = swapped ? unorientedSize.width : unorientedSize.height
+        guard w > 0, h > 0 else {
+            return CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                          width: abs(b.x - a.x), height: abs(b.y - a.y))
+        }
+
+        // Follows the same "rotate clockwise + zoom to cover, then crop back
+        // to a center-fixed WxH box" straighten performs in `apply()` — see
+        // that step for the shared `scale` derivation. A content point at
+        // pixel offset (dx, dy) from center lands at the *same* transform
+        // applied to (dx, dy), because the post-straighten crop re-centers
+        // on that identical point.
+        func warp(_ p: CGPoint) -> CGPoint {
+            let dx = (p.x - 0.5) * w
+            let dy = (p.y - 0.5) * h
+            let theta = straighten * .pi / 180
+            let ratio = max(w, h) / min(w, h)
+            let scale = cos(abs(theta)) + sin(abs(theta)) * ratio
+            let dx2 = scale * (cos(theta) * dx - sin(theta) * dy)
+            let dy2 = scale * (sin(theta) * dx + cos(theta) * dy)
+            return CGPoint(x: (dx2 + w / 2) / w, y: (dy2 + h / 2) / h)
+        }
+
+        // Rotation turns the rect into a tilted quadrilateral; all 4 corners
+        // (not just the two diagonal ones) are needed for a correct bounding box.
+        let corners = [a, CGPoint(x: b.x, y: a.y), CGPoint(x: a.x, y: b.y), b].map(warp)
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        let minX = max(xs.min() ?? 0, 0), minY = max(ys.min() ?? 0, 0)
+        let maxX = min(xs.max() ?? 1, 1), maxY = min(ys.max() ?? 1, 1)
+        return CGRect(x: minX, y: minY, width: max(maxX - minX, 0), height: max(maxY - minY, 0))
+    }
+}
+
+// MARK: - Shared overlay geometry
+
+/// The rect `.scaledToFit()` actually paints an image into, given letterboxing.
+/// Shared by `CropOverlay` and `LevelGrid` so both line their reference
+/// graphics up with the same displayed image bounds.
+private func fitContentRect(imageSize: CGSize, container: CGSize) -> CGRect {
+    guard imageSize.width > 0, imageSize.height > 0 else {
+        return CGRect(origin: .zero, size: container)
+    }
+    let scale = min(container.width / imageSize.width, container.height / imageSize.height)
+    let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+    let origin = CGPoint(x: (container.width - size.width) / 2, y: (container.height - size.height) / 2)
+    return CGRect(origin: origin, size: size)
+}
+
+/// Thirds grid plus a brighter centre cross, drawn inside `frame`.
+///
+/// Two different jobs, which is why the centre is drawn separately rather than
+/// just being another grid line. The thirds lines are for placing a subject; the
+/// centre cross is for *symmetry* — lining a doorway, reflection or horizon up so
+/// it sits truly central. That is impossible to judge by eye against thirds
+/// alone, because neither third is the middle.
+private func thirdsGrid(in frame: CGRect) -> some View {
+    ZStack {
+        Path { p in
+            for i in 1...2 {
+                let x = frame.minX + frame.width * CGFloat(i) / 3
+                p.move(to: CGPoint(x: x, y: frame.minY))
+                p.addLine(to: CGPoint(x: x, y: frame.maxY))
+                let y = frame.minY + frame.height * CGFloat(i) / 3
+                p.move(to: CGPoint(x: frame.minX, y: y))
+                p.addLine(to: CGPoint(x: frame.maxX, y: y))
+            }
+        }
+        .stroke(Color.white.opacity(0.35), lineWidth: 0.75)
+
+        Path { p in
+            p.move(to: CGPoint(x: frame.midX, y: frame.minY))
+            p.addLine(to: CGPoint(x: frame.midX, y: frame.maxY))
+            p.move(to: CGPoint(x: frame.minX, y: frame.midY))
+            p.addLine(to: CGPoint(x: frame.maxX, y: frame.midY))
+        }
+        .stroke(Color.white.opacity(0.65), style: StrokeStyle(lineWidth: 0.75, dash: [5, 4]))
+    }
+    .allowsHitTesting(false)
+}
+
+/// Reference grid shown over the photo while the Straighten tool is active.
+/// Manual straighten previously had no visual reference to judge level
+/// against — just the bare image — which made it hard to tell how far off
+/// (or how much correction was actually landing) without a horizon or
+/// vertical line already in frame. Reuses the same thirds+centre grid as the
+/// crop overlay, since a level, symmetric grid is exactly what "is this
+/// straight yet" needs to be checked against.
+private struct LevelGrid: View {
+    let imageSize: CGSize
+
+    var body: some View {
+        GeometryReader { geo in
+            thirdsGrid(in: fitContentRect(imageSize: imageSize, container: geo.size))
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -327,7 +435,7 @@ private struct CropOverlay: View {
 
     var body: some View {
         GeometryReader { geo in
-            let content = Self.contentRect(imageSize: imageSize, container: geo.size)
+            let content = fitContentRect(imageSize: imageSize, container: geo.size)
             let frame = pixelRect(rect, in: content)
 
             ZStack {
@@ -337,7 +445,9 @@ private struct CropOverlay: View {
                 }
                 .fill(Color.black.opacity(0.55), style: FillStyle(eoFill: true))
 
-                grid(in: frame)
+                // Grid lives inside the crop rect, not the whole image, since
+                // what matters here is the composition being cropped TO.
+                thirdsGrid(in: frame)
 
                 Rectangle()
                     .stroke(Color.white, lineWidth: 1.5)
@@ -351,39 +461,6 @@ private struct CropOverlay: View {
                 }
             }
         }
-    }
-
-    /// Thirds grid plus a brighter centre cross, drawn inside the crop rect.
-    ///
-    /// Two different jobs, which is why the centre is drawn separately rather than
-    /// just being another grid line. The thirds lines are for placing a subject; the
-    /// centre cross is for *symmetry* — lining a doorway, reflection or horizon up so
-    /// it sits truly central. That is impossible to judge by eye against thirds
-    /// alone, because neither third is the middle. Both live inside the crop rect,
-    /// not the whole image, since what matters is the composition being cropped TO.
-    private func grid(in frame: CGRect) -> some View {
-        ZStack {
-            Path { p in
-                for i in 1...2 {
-                    let x = frame.minX + frame.width * CGFloat(i) / 3
-                    p.move(to: CGPoint(x: x, y: frame.minY))
-                    p.addLine(to: CGPoint(x: x, y: frame.maxY))
-                    let y = frame.minY + frame.height * CGFloat(i) / 3
-                    p.move(to: CGPoint(x: frame.minX, y: y))
-                    p.addLine(to: CGPoint(x: frame.maxX, y: y))
-                }
-            }
-            .stroke(Color.white.opacity(0.35), lineWidth: 0.75)
-
-            Path { p in
-                p.move(to: CGPoint(x: frame.midX, y: frame.minY))
-                p.addLine(to: CGPoint(x: frame.midX, y: frame.maxY))
-                p.move(to: CGPoint(x: frame.minX, y: frame.midY))
-                p.addLine(to: CGPoint(x: frame.maxX, y: frame.midY))
-            }
-            .stroke(Color.white.opacity(0.65), style: StrokeStyle(lineWidth: 0.75, dash: [5, 4]))
-        }
-        .allowsHitTesting(false)
     }
 
     private func handle(_ corner: Corner, frame: CGRect, content: CGRect) -> some View {
@@ -454,17 +531,6 @@ private struct CropOverlay: View {
                y: content.minY + r.minY * content.height,
                width: r.width * content.width,
                height: r.height * content.height)
-    }
-
-    /// The rect `.scaledToFit()` actually paints the image into, given letterboxing.
-    private static func contentRect(imageSize: CGSize, container: CGSize) -> CGRect {
-        guard imageSize.width > 0, imageSize.height > 0 else {
-            return CGRect(origin: .zero, size: container)
-        }
-        let scale = min(container.width / imageSize.width, container.height / imageSize.height)
-        let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        let origin = CGPoint(x: (container.width - size.width) / 2, y: (container.height - size.height) / 2)
-        return CGRect(origin: origin, size: size)
     }
 }
 
@@ -550,6 +616,15 @@ struct PhotoEditorView: View {
                 Image(uiImage: shown)
                     .resizable()
                     .scaledToFit()
+                    .overlay(
+                        Group {
+                            // Reference grid while dialing in Straighten — see
+                            // `LevelGrid` for why manual straighten needed one.
+                            if selectedTool.id == "straighten", !showingOriginal {
+                                LevelGrid(imageSize: shown.size)
+                            }
+                        }
+                    )
             } else {
                 ProgressView().tint(.white)
             }
@@ -913,7 +988,9 @@ struct PhotoEditorView: View {
             adj.rotationQuarters = quarters
             adj.flipH = flipH
             adj.cropRect = crop.map {
-                ImagePipeline.orientedCropRect($0, quarters: quarters, flipH: flipH)
+                ImagePipeline.orientedCropRect($0, quarters: quarters, flipH: flipH,
+                                               straighten: adjustments.straighten,
+                                               unorientedSize: proxy?.size ?? .zero)
             } ?? keepCrop
             aiNote = [note, cropNote].compactMap { $0 }.joined(separator: " ")
         }

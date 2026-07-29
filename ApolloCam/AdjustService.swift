@@ -30,7 +30,7 @@ enum AdjustService {
         }
 
         let prompt = """
-You are a photo editor performing colour correction on this photograph.
+You are a photo editor reviewing this photograph for colour correction, level/straightening, and framing.
 
 First read the image honestly: its white balance, exposure, contrast, and whether highlights are blown or shadows are blocked. Then choose correction values.
 
@@ -50,13 +50,15 @@ Value ranges (stay inside them):
 
 Typical corrections are small: values between -0.4 and 0.4. Reserve anything larger for clearly broken exposure or a strong colour cast.
 
-HORIZON
+STRAIGHTEN
 
-Also check the image for a tilted horizon or a vertical reference that should be upright — a sea/land horizon line, a building edge, a doorframe, a horizon implied by the ground plane. If one is visibly off-level, return a "straighten" value in DEGREES to rotate the image so it reads level: positive rotates clockwise, negative rotates counter-clockwise. Most photos are already level — return 0 unless you can actually see the tilt. Typical corrections are small, -10 to 10 degrees; only go higher for an obviously crooked shot. Never invent a horizon that isn't visibly there just to justify a non-zero value.
+Actively look for a line in this photo that should be perfectly vertical or perfectly horizontal, and check whether it actually is. Candidates: building edges and corners, door and window frames, walls, poles, a sea/land horizon, a ground plane. Architectural and street photos almost always have at least one of these — look for it deliberately rather than only reacting to an obvious tilt.
+
+If such a reference line is measurably off — even a modest few degrees, a building leaning slightly, a horizon dipping slightly — return a non-zero "straighten" value in DEGREES to level it: positive rotates the image clockwise, negative counter-clockwise. Typical corrections are small, -10 to 10 degrees; only go higher for an obviously crooked shot. Only return 0 if there is genuinely no vertical/horizontal reference to check, or the one present is already level — do not default to 0 out of caution when a real reference line is visibly tilted.
 
 CROP
 
-Then judge the framing. Propose a crop ONLY if one would clearly improve the photograph — dead space around the subject, a subject stranded off-balance, a distracting element at an edge. If the framing is already working, return null. Most photographs should get null; the same restraint that applies to the colour values applies here.
+Then judge the framing. Propose a crop if it would clearly improve the photograph: dead space around the subject, a subject stranded off-balance, a distracting element at an edge, or — especially for architecture or a symmetric subject — the main subject sitting off-centre when centring it would read as more deliberate and balanced. If the straighten value above is non-zero, remember it zooms in slightly around the image centre; account for that when placing the crop rather than treating the two independently. If the framing is already working, return null; most photographs should still get null, the same restraint that applies to the colour values applies here.
 
 The crop is given in fractions of the image with (0,0) at the TOP-LEFT corner:
 - x, y: top-left corner of the crop
