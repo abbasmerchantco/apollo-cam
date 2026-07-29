@@ -1,10 +1,21 @@
 # ApolloCam — Known Issues
 
-State as of v0.88.
+State as of v0.90.
 
 ## Open
 
-### Untested on device
+### Untested on device (v0.90)
+
+None of the v0.90 photo-editor or gallery work has been run on real hardware yet, and the editor changes in particular involve enough trigonometry to be worth deliberate testing rather than assuming the analytical derivation is correct:
+
+- The straighten auto-zoom-to-cover scale and the crop+straighten composition (`ImagePipeline.orientedCropRect`) were derived and sanity-checked on paper (corner-containment inequalities, a 90° matrix sanity check), not verified against a real rendered photo. Test with a genuinely off-vertical shot at several straighten angles, with and without an accompanying AI-suggested crop, and confirm verticals actually land level and the crop lands where expected — not just close.
+- Swipe-to-select in the gallery (`GalleryView`) hasn't been tested against `LazyVGrid`'s lazy rendering — cell frames are only known for currently-rendered cells, so a fast scroll immediately followed by a drag could in principle miss cells that haven't rendered yet. Likely a non-issue in practice (you can only usefully select what's on screen) but unconfirmed.
+
+### AI vertical/horizon detection is unvalidated
+
+AI Adjust's prompt was broadened in v0.90 to actively look for *any* off-level vertical or horizontal reference — building edges, doorframes, poles, a horizon — rather than only an obvious tilted horizon, after real use turned up a photo of a slightly-off, off-centre building that the original (horizon-only, "return 0 unless you can actually see the tilt") wording didn't correct. The crop suggestion was also extended to consider symmetry/centering, not just dead space or an off-balance subject. Whether the broadened prompt reliably catches subtle tilts, and whether the crop-for-symmetry addition helps or adds noise, is the kind of thing only real shooting across a variety of photos answers — same category of open question as the AI crop threshold below.
+
+### Untested on device (v0.88)
 
 None of the v0.88 camera work has been run on real hardware yet. The zoom rework in particular is the kind of change that can only be judged on a physical phone:
 
@@ -15,6 +26,14 @@ None of the v0.88 camera work has been run on real hardware yet. The zoom rework
 ### AI-suggested zoom is unvalidated
 
 Claude now returns a zoom alongside its coaching tip. The prompt biases it toward real lens stops and toward tighter framing, on the theory that beginners shoot too wide. Whether it's right often enough to be worth a button is an open question that only real shooting answers. The chip is suppressed when the suggestion is within 12% of the current zoom, so a badly-calibrated model shows up as a chip that never appears rather than one that fights the user.
+
+## Fixed in v0.90
+
+### `EditAdjustments` schema changes could have silently emptied the gallery
+
+**Root cause:** `EditAdjustments` relied on synthesized `Codable`. Swift's synthesized `Decodable` requires every stored property's key to be present in the decoded JSON regardless of whether the property has a default value — easy to miss, since the memberwise initializer (used everywhere `EditAdjustments()` appears in code) happily uses those defaults. `PhotoStore.load()` decodes the entire `[PhotoEntry]` array in a single call and swallows any failure with `try?`, treating it as "no saved entries." So the moment any field was added to `EditAdjustments` — as `straighten` needed to be, for this version's precise-rotation work — every `PhotoEntry` saved by a prior build would fail to decode, and the whole persisted gallery index would silently come back empty on next launch.
+
+**Fix:** `EditAdjustments` now has a custom `init(from:)` that reads each field via `decodeIfPresent(...) ?? default`, making every key optional at decode time regardless of the stored property's own type. This was never exercised by a real schema change before now — `rotationQuarters`, `flipH`, and `cropRect` had presumably each carried the same latent risk when they were originally added — so the fix covers those retroactively too, not just `straighten`. Any field added to this struct going forward should follow the same pattern.
 
 ## Fixed in v0.88
 
@@ -29,8 +48,6 @@ Selecting a guide from the camera's composition sheet changed the coaching text 
 ### 0.5× was unreachable
 
 `CameraController` only ever opened `.builtInWideAngleCamera`, whose `minAvailableVideoZoomFactor` is 1.0. No amount of UI work could expose an ultra-wide, because the ultra-wide was never part of the capture session. Fixed by preferring the widest available *virtual* device (triple → dual-wide → dual → wide) and mapping between device zoom and the display zoom the user reads.
-
-## Fixed in v0.85
 
 ## Fixed in v0.85
 

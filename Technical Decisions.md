@@ -1,6 +1,6 @@
 # ApolloCam — Technical Decisions
 
-State as of v0.82.
+State as of v0.82, with additions noted (v0.90) where a new decision was made in a later pass. Not a full rewrite for the intervening versions — see `Architecture.md` / `Known Issues.md` / `Roadmap.md` for what shipped in v0.85/v0.88 in the meantime.
 
 ## Overview
 
@@ -97,6 +97,26 @@ This document captures key architectural and technology choices made for ApolloC
 
 **Trade-offs:** More UI state to manage; slightly more code. Worth the clarity.
 
+### Straighten as Rotate + Auto-Zoom-to-Cover, Not Perspective/Keystone Correction (v0.90)
+
+**Decision:** The Straighten tool (and AI Adjust's matching suggestion) is a single continuous in-plane rotation (±45°) about the image center, with just enough zoom to eliminate the empty corner wedges the rotation exposes. It does not attempt perspective/keystone correction (fixing converging verticals caused by tilting the camera up or down at a building, for example).
+
+**Reasoning:** In-plane rotation is a 2D affine transform Core Image already does cheaply and exactly, and it's what "the horizon/a building edge is tilted in the frame" actually needs. True keystone correction is a 3D perspective warp — a materially different, more complex operation (four independently-draggable corner handles or a vertical-vanishing-point estimate, non-affine image resampling) that solves a different symptom (converging verticals from camera angle, not in-plane tilt). Building both at once would have doubled the scope of a tool meant to be a lightweight companion to the 90° rotate button.
+
+**Alternatives considered:** Full keystone/perspective correction tool (real capability gap for architecture shooters, but significantly more UI and math — a candidate for its own future pass, not a straighten slider); leaving empty corners after rotation and requiring a manual follow-up crop (simpler code, worse UX — Photos/Snapseed's auto-zoom-to-cover behavior is what users expect from a "straighten" control).
+
+**Trade-offs:** A photo whose problem is genuinely converging verticals (not just an off-level horizon) will not look fully corrected after Straighten — rotating it can make the tilt read differently but can't remove the perspective convergence itself. Worth flagging to users only if this turns out to be a common request in practice; not addressed now.
+
+### Backward-Compatible Custom Decoding for `EditAdjustments` (v0.90)
+
+**Decision:** `EditAdjustments` implements a custom `Decodable.init(from:)` that reads every field via `decodeIfPresent(...) ?? default`, rather than relying on Swift's synthesized `Codable` conformance.
+
+**Reasoning:** Synthesized `Decodable` requires every stored property's key to be present in the source JSON regardless of the property's own default value. `PhotoStore.load()` decodes the entire persisted `[PhotoEntry]` array in one call and swallows failure with `try?` (a saved-locally, no-backend design — see "Local-Only Storage" below), so a single missing key anywhere in the array fails the *whole* decode, and the app behaves as if the gallery were empty. Since this struct is expected to keep gaining fields as editing tools are added (straighten in v0.90; more will follow), a decode strategy that breaks on every future field addition is a standing risk to real user data, not a one-time cost.
+
+**Alternatives considered:** Leave synthesized `Codable` and remember to version-migrate on every future field addition (relies on remembering, under exactly the conditions — a fast feature addition — where it's easiest to forget); wrap the array decode to decode entries individually and drop only the failing ones (would at least localize data loss to the changed entries rather than the whole array, but doesn't address the root cause and adds its own complexity to `PhotoStore`).
+
+**Trade-offs:** A few more lines of boilerplate whenever a field is added or renamed (must remember to add the corresponding `CodingKeys` case and `decodeIfPresent` line) — a small, contained cost in exchange for removing a category of silent data loss.
+
 ---
 
 ## Architecture & State Management
@@ -171,4 +191,4 @@ Areas acknowledged for future work:
 
 This document is updated alongside `Architecture.md` after significant technical changes (new features, major refactors, or decisions to revisit earlier choices).
 
-Last reviewed: v0.82 camera redesign and photo editor fixes.
+Last reviewed: v0.82 camera redesign and photo editor fixes, with v0.90 additions for the Straighten tool and the `EditAdjustments` decoding fix. The v0.85/v0.88 gap in this document (zoom rework, camera-screen composition-guide fix, gallery multi-select) was not backfilled — see `Architecture.md`, `Known Issues.md`, and `Roadmap.md` for those.

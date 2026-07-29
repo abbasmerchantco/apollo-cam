@@ -44,21 +44,23 @@ Pick whichever matches your setup:
 2. In the app: **Settings tab → paste key → Save key.** Stored in the iOS Keychain, only ever sent to api.anthropic.com.
 3. Default model is Haiku (fraction of a cent per critique). Switch to Sonnet in Settings for deeper feedback.
 
-## What works (as of v0.88)
+## What works (as of v0.90)
 - **Camera coach** — a single line of live advice over the preview. On-device guidance by default; turn on Coach and Claude looks at the frame and gives one concrete instruction plus a suggested zoom.
 - **Composition guide** — a rule-of-thirds grid over the live preview by default (toggle in Settings → Camera). Pick a specific guide — Auto, rule of thirds, centered, symmetry, leading lines — to draw that guide's shape instead, which turns green when your subject lands on target.
 - **Subject detection** — on-device (faces > animals > salient objects), directional guidance ("Move subject right and up"), haptic when aligned. Tap to pick your subject; tap it again to clear.
 - **Lighting hints** — too dark / blown-out warnings.
 - **Zoom** — 0.5×/1×/2×/3×-style stop buttons taken from the lenses your phone actually has, expanding to a fine slider on demand. Pinch works too.
 - **Evaluate** — 5-dimension Claude critique (Composition, Lighting, Color, Focus, Aesthetics) with scores, feedback, and one actionable tip each. Available on single photos or a gallery selection.
-- **Editor** — manual tone/colour sliders, rotate, flip, crop (with a thirds grid and centre cross), and AI Adjust, which suggests values and a crop on the same controls.
+- **Editor** — manual tone/colour sliders, rotate, flip, a precise ±45° Straighten slider (with a reference grid), crop (with a thirds grid and centre cross, now inset from the screen edge for easier corner handles), and AI Adjust, which suggests values, a straighten correction, and a crop on the same controls.
 - **Learn from pros** — import any photo you admire → "Why does this work?" teacher-mode breakdown.
-- **Gallery** — all photos + critiques stored locally on-device, with multi-select for bulk save / share / evaluate / delete.
+- **Gallery** — all photos + critiques stored locally on-device, with multi-select (tap or swipe-drag to select a batch) for bulk save / share / evaluate / delete.
 
 ## Honest limitations
 - "Auto" composition selection is heuristic (subject size/position), not a trained scene classifier.
 - Leading lines / frame-within-frame overlays are static guides — the app doesn't yet detect actual lines in your scene.
 - The v0.88 zoom work has not been run on a physical phone yet, and the simulator can't exercise it (no multi-lens device, so it falls back to 1×–3×). See `Known Issues.md`.
+- The v0.90 Straighten tool fixes in-plane tilt only, not perspective/keystone distortion (converging verticals from tilting the camera up or down at a building) — a genuinely different correction that isn't built yet.
+- The v0.90 editor math (straighten's auto-zoom, and its composition with an AI-suggested crop) has not been run on a physical phone yet either. See `Known Issues.md`.
 - No accounts/sync — all local (fine while the user is just you).
 - Iteration loop is: edit code → push → wait ~5 min for CI → reinstall ipa. Slower than Xcode, but free and Mac-less.
 

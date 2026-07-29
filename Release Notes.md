@@ -1,5 +1,24 @@
 # ApolloCam — Release Notes
 
+## v0.90
+
+**Editor — Straighten**
+- New Straighten tool: a precise rotation slider (±45°) alongside the existing 90° rotate button, for fixing a slightly tilted shot rather than only quarter-turns. It auto-zooms in just enough to remove the empty corners a rotation would otherwise leave, so there's nothing left to crop afterward.
+- A reference grid now appears over the photo while Straighten is selected, so you have thirds lines and a centre cross to line the image up against — previously there was nothing to check level against but your eye.
+
+**Editor — crop**
+- The crop area now sits slightly inset from the edge of the screen, so the corner handles aren't fighting the edge of the display — they were nearly impossible to get a finger around before.
+
+**AI Adjust**
+- AI Adjust now also checks whether your photo is level and suggests a straighten correction alongside the usual exposure/colour values — looking specifically for building edges, doorframes, poles, or a horizon that isn't quite upright.
+- Its crop suggestions now also consider symmetry and centring (not just tidying up dead space), and take any straighten correction into account so the two suggestions land together correctly.
+
+**Gallery — swipe to select**
+- In Select mode, drag your finger across photos to select (or deselect) a whole batch at once, instead of tapping each one individually.
+
+**Under the hood**
+- Fixed a bug that could have silently wiped your saved gallery index the next time a new edit field was introduced. Doesn't change anything you'll see, but it was a real risk this release would have triggered.
+
 ## v0.88
 
 The theme of this release is making the app usable by someone who doesn't know what makes a photo good. Every change below exists to move a decision off the user and onto the app.
